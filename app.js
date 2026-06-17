@@ -27,6 +27,9 @@
   const HEADER_H = 30, LINE_H = 18, BODY_TOP = 4, BODY_BOT = 6;
   const GAPX = 72, GAPY = 66, BLOCK_GAP = 96, MARGIN = 90;
   const NODE_MIN_W = 150, NODE_MAX_W = 560;
+  // En dessous de ce nombre d'entités, on coche tout par défaut (assoc comprises) ;
+  // au-dessus, on coche seulement Propriétés + Enums (les assoc, lourdes, restent activables).
+  const SMALL_CORPUS = 120;
   const PALETTE = [
     "#3b82f6","#10b981","#f59e0b","#ef4444","#a78bfa","#ec4899","#14b8a6",
     "#f97316","#6366f1","#84cc16","#06b6d4","#e11d48","#8b5cf6","#22c55e",
@@ -42,10 +45,15 @@
     rootColor: new Map(),      // name -> color (par famille)
     files: [],
 
-    mode: "global",            // "global" | "focus"
+    mode: "global",            // "global" | "focus" | "liaison"
     focusRoot: null,
-    selected: null,            // classe sélectionnée
+    selected: null,            // classe sélectionnée (primaire, pour le panneau détails)
     selectedEnum: null,        // enum sélectionné (clé "enum::Nom")
+    multiSel: new Set(),       // sélection multiple (rubber-band / Maj+clic) -> clés de classes
+
+    adjacency: new Map(),      // name -> Set(voisins) (héritage + assoc, non orienté) — pour la liaison
+    liaisonSel: [],            // entités d'origine d'une liaison
+    liaisonPathEdges: new Set(),// arêtes "a|b" appartenant aux chemins de liaison (surbrillance)
 
     layout: new Map(),         // name|enum::name -> {x,y,w,h}
     nodeSet: new Set(),        // clés présentes dans la vue courante
@@ -56,8 +64,13 @@
     view: { tx: 0, ty: 0, scale: 1 },
     showAssoc: false,
     showEnums: false,
-    expandedGlobal: false,
+    showProps: false,          // case "Propriétés" : compartiments de propriétés (global ET focus)
     depthLimit: 10,            // 0..20 niveaux de sous-classes ; 20 = sans limite (∞)
+
+    // --- rendu incrémental (LOD + culling) ---
+    _region: null,             // zone monde actuellement montée dans le DOM
+    _lod: null,                // niveau de détail rendu : "mini" | "compact" | "full"
+    _paintReq: 0,
   };
 
   /* --------------------------- Références DOM ---------------------------- */
@@ -71,6 +84,8 @@
   const depthRange = $("depthRange"), depthVal = $("depthVal");
   const modePill = $("modePill"), modeLabel = $("modeLabel");
   const btnExportFull = $("btnExportFull");
+  const selBox = $("selBox"), selBar = $("selBar"), selCount = $("selCount"), btnLiaison = $("btnLiaison");
+  const liaisonBasket = $("liaisonBasket"), basketChips = $("basketChips"), btnBasketLink = $("btnBasketLink");
 
   const mctx = document.createElement("canvas").getContext("2d");
   function measure(text, font) { mctx.font = font; return mctx.measureText(text).width; }
@@ -263,7 +278,30 @@
       if (!rootCache.has(r)) rootCache.set(r, PALETTE[pi++ % PALETTE.length]);
       state.rootColor.set(name, rootCache.get(r));
     }
+    buildAdjacency();
     state.globalLayoutCache = null;
+  }
+
+  // Graphe non orienté (héritage + associations entre classes) pour le calcul des liaisons.
+  // Les "conteneurs" (types-document listant des refs) sont exclus : sinon presque toutes les
+  // entités seraient reliées trivialement via le même conteneur, ce qui n'a aucun sens.
+  function buildAdjacency() {
+    const adj = new Map();
+    const link = (a, b) => {
+      if (a === b) return;
+      if (!adj.has(a)) adj.set(a, new Set());
+      adj.get(a).add(b);
+    };
+    for (const [name, c] of state.classes) {
+      if (isContainer(name)) continue;
+      const b = baseOf(name);
+      if (b && !isContainer(b)) { link(name, b); link(b, name); }
+      for (const p of c.props) {
+        const rt = refTypeOf(p);
+        if (rt && state.classes.has(rt) && !isContainer(rt)) { link(name, rt); link(rt, name); }
+      }
+    }
+    state.adjacency = adj;
   }
 
   /* ----------------------------- Helpers modèle -------------------------- */
@@ -429,7 +467,7 @@
   }
 
   function layoutGlobal() {
-    const expanded = state.expandedGlobal;
+    const expanded = state.showProps;
     const placed = new Set();
     const blocks = [];
     // un bloc par racine d'héritage
@@ -479,7 +517,7 @@
   }
 
   function layoutFocus(rootName) {
-    const expanded = true;
+    const expanded = state.showProps;
     const maxD = effDepth();
     const focusDesc = descendantsLimited(rootName, maxD);
     const inhSet = new Set([rootName]);
@@ -487,14 +525,13 @@
     focusDesc.forEach(d => inhSet.add(d));
     const top = ancestors(rootName).slice(-1)[0] || rootName;
     const tl = layoutTree(top, inhSet, expanded);
-    // voisins par association (classes + enums) reliés à l'ensemble d'héritage
+    // Voisins (enums + associations) ajoutés UNIQUEMENT selon les cases à cocher.
+    // C'est le levier anti-lag : sur un gros focus, Associations décochée = juste l'héritage.
     const layout = new Map(tl);
-    if (state.showAssoc || true) {
-      const bb = bboxOf(tl);
-      const neighbors = [];
-      const seen = new Set(inhSet);
-      // ÉNUMS : pour TOUTES les entités du focus (ancêtres + entité + descendants).
-      // Chaque propriété de type énum fait apparaître son énum, relié à l'entité concernée.
+    const neighbors = [];
+    const seen = new Set(inhSet);
+    if (state.showEnums) {
+      // ÉNUMS : chaque propriété de type énum (de toute entité du focus) fait apparaître son énum.
       for (const n of inhSet) {
         const c = state.classes.get(n); if (!c) continue;
         for (const p of c.props) {
@@ -502,8 +539,9 @@
           if (rt && state.enums.has(rt) && !seen.has("enum::" + rt)) { seen.add("enum::" + rt); neighbors.push("enum::" + rt); }
         }
       }
-      // ASSOCIATIONS de classes SORTANTES : entité focalisée + descendants (bornés) seulement
-      // (les ancêtres restent une colonne vertébrale d'héritage, sans bruit d'association).
+    }
+    if (state.showAssoc) {
+      // SORTANTES : entité focalisée + descendants (les ancêtres restent une colonne d'héritage).
       const assocScope = [rootName, ...focusDesc];
       for (const n of assocScope) {
         const c = state.classes.get(n); if (!c) continue;
@@ -512,7 +550,7 @@
           if (rt && state.classes.has(rt) && !seen.has(rt) && !isContainer(rt)) { seen.add(rt); neighbors.push(rt); }
         }
       }
-      // ASSOCIATIONS ENTRANTES : classes (non conteneurs) référençant l'entité ou ses descendants (bornés).
+      // ENTRANTES : classes (non conteneurs) référençant l'entité ou ses descendants (bornés).
       const inboundTargets = new Set([rootName, ...focusDesc]);
       for (const [cn, c] of state.classes) {
         if (seen.has(cn) || isContainer(cn)) continue;
@@ -521,6 +559,9 @@
           if (rt && inboundTargets.has(rt)) { seen.add(cn); neighbors.push(cn); break; }
         }
       }
+    }
+    if (neighbors.length) {
+      const bb = bboxOf(tl);
       neighbors.sort();
       let ny = bb.minY, nx = bb.maxX + 160, colMax = 0;
       const limitY = bb.maxY + 600;
@@ -552,20 +593,21 @@
       const b = baseOf(key);
       if (b && set.has(b)) E.push({ from: key, to: b, kind: "inh" });
     }
-    if (state.showAssoc || state.mode === "focus") {
-      for (const key of set) {
-        if (key.startsWith("enum::")) continue;
-        const c = state.classes.get(key); if (!c) continue;
-        const seen = new Set();
-        for (const p of c.props) {
-          const rt = refTypeOf(p); if (!rt) continue;
-          let tgt = null;
-          if (state.classes.has(rt) && set.has(rt)) tgt = rt;
-          else if (state.enums.has(rt) && set.has("enum::" + rt)) tgt = "enum::" + rt; // arête vers l'énum si présent
-          if (!tgt || tgt === key) continue;
-          const k = key + ">" + tgt; if (seen.has(k)) continue; seen.add(k);
-          E.push({ from: key, to: tgt, kind: tgt.startsWith("enum::") ? "enum" : "assoc", label: p.name });
-        }
+    // Arêtes d'association (classe→classe) si la case est cochée (toujours en mode liaison).
+    // Arêtes vers énums dès que le nœud énum est présent (donc piloté par la case Enums).
+    const drawAssoc = state.showAssoc || state.mode === "liaison";
+    for (const key of set) {
+      if (key.startsWith("enum::")) continue;
+      const c = state.classes.get(key); if (!c) continue;
+      const seen = new Set();
+      for (const p of c.props) {
+        const rt = refTypeOf(p); if (!rt) continue;
+        let tgt = null;
+        if (drawAssoc && state.classes.has(rt) && set.has(rt)) tgt = rt;
+        else if (state.enums.has(rt) && set.has("enum::" + rt)) tgt = "enum::" + rt;
+        if (!tgt || tgt === key) continue;
+        const k = key + ">" + tgt; if (seen.has(k)) continue; seen.add(k);
+        E.push({ from: key, to: tgt, kind: tgt.startsWith("enum::") ? "enum" : "assoc", label: p.name });
       }
     }
     state.edges = E;
@@ -582,62 +624,95 @@
     return { x: cx + dx * s, y: cy + dy * s };
   }
 
-  function renderEdges() {
+  function r0(n) { return Math.round(n); }
+  function edgeKey(a, b) { return a < b ? a + "|" + b : b + "|" + a; }
+
+  // Pointe de flèche dessinée DANS la géométrie (pas de <marker>) -> permet le batching.
+  function arrowTri(tip, dx, dy, size) {
+    const px = -dy, py = dx, w = size * 0.62;
+    const bx = tip.x - dx * size, by = tip.y - dy * size;
+    return `M${r0(tip.x)},${r0(tip.y)} L${r0(bx + px * w)},${r0(by + py * w)} L${r0(bx - px * w)},${r0(by - py * w)}Z`;
+  }
+  function arrowChevron(tip, dx, dy, size) {
+    const px = -dy, py = dx, w = size * 0.55;
+    const bx = tip.x - dx * size, by = tip.y - dy * size;
+    return `M${r0(bx + px * w)},${r0(by + py * w)} L${r0(tip.x)},${r0(tip.y)} L${r0(bx - px * w)},${r0(by - py * w)}`;
+  }
+  function edgeNearRegion(a, b, region) {
+    const minX = Math.min(a.x, b.x), minY = Math.min(a.y, b.y);
+    const maxX = Math.max(a.x + a.w, b.x + b.w), maxY = Math.max(a.y + a.h, b.y + b.h);
+    return !(minX > region.maxX || maxX < region.minX || minY > region.maxY || maxY < region.minY);
+  }
+
+  // Toutes les arêtes d'un même type sont fusionnées en un seul <path> (flèches incluses)
+  // et seules celles proches de la zone rendue sont tracées. Énorme gain de DOM/SVG.
+  function paintEdges(region) {
     const L = state.layout;
-    let defs = `<defs>
-      <marker id="m-inh" markerWidth="14" markerHeight="14" refX="11" refY="6" orient="auto" markerUnits="userSpaceOnUse">
-        <path d="M1,1 L12,6 L1,11 Z" fill="#0e1117" stroke="#f59e0b" stroke-width="1.4"/>
-      </marker>
-      <marker id="m-assoc" markerWidth="11" markerHeight="11" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse">
-        <path d="M1,1 L9,5 L1,9" fill="none" stroke="#38bdf8" stroke-width="1.4"/>
-      </marker>
-      <marker id="m-enum" markerWidth="11" markerHeight="11" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse">
-        <path d="M1,1 L9,5 L1,9" fill="none" stroke="#a78bfa" stroke-width="1.4"/>
-      </marker>
-    </defs>`;
-    let paths = "", labels = "";
-    const showLabels = state.mode === "focus";
+    const showLabels = (state.mode === "focus" || state.mode === "liaison") && state._lod === "full";
+    let dInh = "", dAssoc = "", dEnum = "", aInh = "", aAssoc = "", aEnum = "", dLia = "", labels = "";
+    let nLabels = 0;
+    const liaison = state.mode === "liaison" && state.liaisonPathEdges.size;
     for (const e of state.edges) {
       const a = L.get(e.from), b = L.get(e.to);
       if (!a || !b) continue;
+      if (region && !edgeNearRegion(a, b, region)) continue;
       const acx = a.x + a.w / 2, acy = a.y + a.h / 2, bcx = b.x + b.w / 2, bcy = b.y + b.h / 2;
       const pa = borderPoint(a, bcx, bcy), pb = borderPoint(b, acx, acy);
+      const len = Math.hypot(pb.x - pa.x, pb.y - pa.y) || 1;
+      const ux = (pb.x - pa.x) / len, uy = (pb.y - pa.y) / len;
+      let d;
       if (e.kind === "inh") {
         const my = (pa.y + pb.y) / 2;
-        paths += `<path class="e-inh" d="M${pa.x},${pa.y} C ${pa.x},${my} ${pb.x},${my} ${pb.x},${pb.y}" marker-end="url(#m-inh)"/>`;
+        d = `M${r0(pa.x)},${r0(pa.y)} C${r0(pa.x)},${r0(my)} ${r0(pb.x)},${r0(my)} ${r0(pb.x)},${r0(pb.y)}`;
+        dInh += d; aInh += arrowTri(pb, ux, uy, 12);
       } else {
-        const cls = e.kind === "enum" ? "e-enum" : "e-assoc";
         const mx = (pa.x + pb.x) / 2;
-        paths += `<path class="${cls}" d="M${pa.x},${pa.y} C ${mx},${pa.y} ${mx},${pb.y} ${pb.x},${pb.y}" marker-end="url(#m-${e.kind})"/>`;
-        if (showLabels && e.label) {
-          labels += `<text class="e-label" x="${(pa.x + pb.x) / 2}" y="${(pa.y + pb.y) / 2 - 3}">${escapeHtml(e.label)}</text>`;
+        d = `M${r0(pa.x)},${r0(pa.y)} C${r0(mx)},${r0(pa.y)} ${r0(mx)},${r0(pb.y)} ${r0(pb.x)},${r0(pb.y)}`;
+        if (e.kind === "enum") { dEnum += d; aEnum += arrowChevron(pb, ux, uy, 10); }
+        else { dAssoc += d; aAssoc += arrowChevron(pb, ux, uy, 10); }
+        if (showLabels && e.label && nLabels < 140) {
+          labels += `<text class="e-label" x="${r0((pa.x + pb.x) / 2)}" y="${r0((pa.y + pb.y) / 2 - 3)}">${escapeHtml(e.label)}</text>`;
+          nLabels++;
         }
       }
+      if (liaison && state.liaisonPathEdges.has(edgeKey(e.from, e.to))) dLia += d;
     }
-    edgesSvg.setAttribute("width", state.worldW);
-    edgesSvg.setAttribute("height", state.worldH);
-    edgesSvg.style.width = state.worldW + "px";
-    edgesSvg.style.height = state.worldH + "px";
-    edgesSvg.innerHTML = defs + paths + labels;
+    let svg = "";
+    if (dLia) svg += `<path class="e-lia" d="${dLia}"/>`;       // surbrillance sous les arêtes
+    if (dInh) svg += `<path class="e-inh" d="${dInh}"/>`;
+    if (dAssoc) svg += `<path class="e-assoc" d="${dAssoc}"/>`;
+    if (dEnum) svg += `<path class="e-enum" d="${dEnum}"/>`;
+    if (aInh) svg += `<path class="e-inh-arrow" d="${aInh}"/>`;
+    if (aAssoc) svg += `<path class="e-assoc-arrow" d="${aAssoc}"/>`;
+    if (aEnum) svg += `<path class="e-enum-arrow" d="${aEnum}"/>`;
+    edgesSvg.innerHTML = svg + labels;
   }
 
-  function nodeHtml(key) {
+  function nodeHtml(key, lod) {
     const box = state.layout.get(key);
+    const isEnum = key.startsWith("enum::");
     const style = `left:${box.x}px;top:${box.y}px;width:${box.w}px`;
-    if (key.startsWith("enum::")) {
+    // Niveau "mini" (très dézoomé) : un simple bloc coloré, illisible de toute façon -> léger.
+    if (lod === "mini") {
+      const color = isEnum ? "#6d5bb5" : (state.rootColor.get(key) || "#3b82f6");
+      return `<div class="node mini${isEnum ? " enum-node" : ""}" data-name="${escapeAttr(key)}" style="${style};height:${box.h}px;background:${color}"></div>`;
+    }
+    if (isEnum) {
       const name = key.slice(6); const e = state.enums.get(name); const vals = e ? e.values : [];
       let body = "";
-      for (const v of vals) body += `<div class="prop"><span class="pn">${escapeHtml(String(v))}</span></div>`; // toutes les valeurs
+      if (lod === "full") {
+        for (const v of vals) body += `<div class="prop"><span class="pn">${escapeHtml(String(v))}</span></div>`;
+        body = `<div class="node-body">${body}</div>`;
+      }
       return `<div class="node enum-node" data-name="${escapeAttr(key)}" style="${style}">
         <div class="node-hd" style="background:#6d5bb5">
           <span class="nm">${escapeHtml(name)}<span class="stereo">«enum»</span></span>
-        </div>
-        <div class="node-body">${body}</div>
+        </div>${body}
       </div>`;
     }
     const c = state.classes.get(key);
     const color = state.rootColor.get(key) || "#3b82f6";
-    const expanded = (state.mode === "focus") || state.expandedGlobal;
+    const expanded = lod === "full" && state.showProps;
     const abs = c.abstract ? `<span class="abs">{abstrait}</span>` : "";
     let body = "";
     if (expanded) {
@@ -661,35 +736,90 @@
     </div>`;
   }
 
+  // Re-construit entièrement la vue (arêtes + taille du monde) puis peint la zone visible.
   function render() {
     buildEdges();
-    let html = "";
-    for (const key of state.nodeSet) html += nodeHtml(key);
-    nodesLayer.innerHTML = html;
-    renderEdges();
     world.style.width = state.worldW + "px";
     world.style.height = state.worldH + "px";
-    if (state.selected && state.nodeSet.has(state.selected)) {
-      const el = nodesLayer.querySelector(`.node[data-name="${cssEsc(state.selected)}"]`);
-      if (el) el.classList.add("selected");
-    }
+    edgesSvg.setAttribute("width", state.worldW);
+    edgesSvg.setAttribute("height", state.worldH);
+    edgesSvg.style.width = state.worldW + "px";
+    edgesSvg.style.height = state.worldH + "px";
+    state._region = null;
+    paint();
     applyTransform();
   }
 
+  // Niveau de détail selon le zoom : props lisibles -> "full", sinon en-tête seul, sinon bloc.
+  function lodLevel() {
+    const s = state.view.scale;
+    if (s < 0.16) return "mini";
+    if (s < 0.42) return "compact";
+    return "full";
+  }
+  // Fenêtre visible en coordonnées "monde", élargie d'une marge (fraction de la fenêtre).
+  function viewportWorldRect(marginFrac) {
+    const r = canvas.getBoundingClientRect();
+    const visW = Math.max(160, r.width - rightInset());
+    const v = state.view, s = v.scale;
+    const x0 = -v.tx / s, y0 = -v.ty / s;
+    const x1 = (visW - v.tx) / s, y1 = (r.height - v.ty) / s;
+    const mx = (x1 - x0) * marginFrac, my = (y1 - y0) * marginFrac;
+    return { minX: x0 - mx, minY: y0 - my, maxX: x1 + mx, maxY: y1 + my };
+  }
+
+  // Monte UNIQUEMENT les nœuds visibles, au LOD courant. Le reste n'existe pas dans le DOM.
+  function paint() {
+    const lod = lodLevel();
+    const region = viewportWorldRect(0.6);
+    state._lod = lod; state._region = region;
+    let html = "";
+    for (const key of state.nodeSet) {
+      const b = state.layout.get(key); if (!b) continue;
+      if (b.x > region.maxX || b.x + b.w < region.minX || b.y > region.maxY || b.y + b.h < region.minY) continue;
+      html += nodeHtml(key, lod);
+    }
+    nodesLayer.innerHTML = html;
+    paintEdges(region);
+    applySelectionClasses();
+  }
+
+  function schedulePaint() {
+    if (state._paintReq) return;
+    state._paintReq = requestAnimationFrame(() => { state._paintReq = 0; maybePaint(); });
+  }
+  // Ne repeint que si le LOD change ou si la fenêtre sort de la zone déjà rendue (pan fluide).
+  function maybePaint() {
+    if (!state._region || lodLevel() !== state._lod) { paint(); return; }
+    const vp = viewportWorldRect(0), reg = state._region;
+    if (vp.minX < reg.minX || vp.minY < reg.minY || vp.maxX > reg.maxX || vp.maxY > reg.maxY) paint();
+  }
+
+  function nodeEl(key) { return nodesLayer.querySelector(`.node[data-name="${cssEsc(key)}"]`); }
+  function applySelectionClasses() {
+    if (state.selected) { const el = nodeEl(state.selected); if (el) el.classList.add("selected"); }
+    if (state.selectedEnum) { const el = nodeEl(state.selectedEnum); if (el) el.classList.add("selected"); }
+    for (const k of state.multiSel) { const el = nodeEl(k); if (el) el.classList.add("multi"); }
+    if (state.mode === "liaison") for (const k of state.liaisonSel) { const el = nodeEl(k); if (el) el.classList.add("lia-end"); }
+  }
+
   function setView(modeLayout) {
-    state.layout = modeLayout.layout;
+    // Clone des boîtes : déplacer un nœud ne corrompt pas le cache de layout (reset au re-focus).
+    state.layout = new Map();
+    for (const [k, v] of modeLayout.layout) state.layout.set(k, { x: v.x, y: v.y, w: v.w, h: v.h });
     state.worldW = modeLayout.worldW;
     state.worldH = modeLayout.worldH;
-    state.nodeSet = new Set(modeLayout.layout.keys());
+    state.nodeSet = new Set(state.layout.keys());
   }
 
   function showGlobal() {
     state.mode = "global";
     state.focusRoot = null;
+    state.liaisonSel = []; state.liaisonPathEdges = new Set();
     modePill.hidden = true;
-    if (!state.globalLayoutCache || state.globalLayoutCache.expanded !== state.expandedGlobal || state.globalLayoutCache.enums !== state.showEnums || state.globalLayoutCache.depth !== state.depthLimit) {
+    if (!state.globalLayoutCache || state.globalLayoutCache.expanded !== state.showProps || state.globalLayoutCache.enums !== state.showEnums || state.globalLayoutCache.depth !== state.depthLimit) {
       const gl = layoutGlobal();
-      state.globalLayoutCache = { ...gl, expanded: state.expandedGlobal, enums: state.showEnums, depth: state.depthLimit };
+      state.globalLayoutCache = { ...gl, expanded: state.showProps, enums: state.showEnums, depth: state.depthLimit };
     }
     setView(state.globalLayoutCache);
     render();
@@ -701,6 +831,7 @@
     state.mode = "focus";
     state.focusRoot = name;
     state.selected = name;
+    state.liaisonSel = []; state.liaisonPathEdges = new Set();
     modePill.hidden = false;
     modeLabel.textContent = "Focus : " + name;
     setView(layoutFocus(name));
@@ -709,11 +840,104 @@
     fitView();               // … puis ajuste dans la zone réellement visible
   }
 
+  /* ----------------------------- LIAISON --------------------------------- */
+  // Plus court chemin (BFS) sur le graphe non orienté héritage+associations.
+  function bfsPred(start) {
+    const pred = new Map(); pred.set(start, null);
+    const q = [start]; let h = 0;
+    while (h < q.length) {
+      const n = q[h++];
+      const nbrs = state.adjacency.get(n); if (!nbrs) continue;
+      for (const nb of nbrs) if (!pred.has(nb)) { pred.set(nb, n); q.push(nb); }
+    }
+    return pred;
+  }
+  function pathBetween(pred, target) {
+    if (!pred.has(target)) return null;
+    const path = []; let cur = target;
+    while (cur != null) { path.push(cur); cur = pred.get(cur); }
+    return path.reverse();
+  }
+
+  // Affiche le sous-graphe reliant 2+ entités (chemins les plus courts entre toutes les paires).
+  function enterLiaison(keys) {
+    keys = [...new Set(keys.filter(k => state.classes.has(k)))];
+    if (keys.length < 2) return;
+    const union = new Set(keys);
+    const pathEdges = new Set();
+    const preds = new Map();
+    for (const k of keys) preds.set(k, bfsPred(k));
+    const disconnected = [];
+    for (let i = 0; i < keys.length; i++) {
+      for (let j = i + 1; j < keys.length; j++) {
+        const path = pathBetween(preds.get(keys[i]), keys[j]);
+        if (!path) { disconnected.push([keys[i], keys[j]]); continue; }
+        for (let t = 0; t < path.length; t++) {
+          union.add(path[t]);
+          if (t) pathEdges.add(edgeKey(path[t - 1], path[t]));
+        }
+      }
+    }
+    state.mode = "liaison";
+    state.focusRoot = null;
+    state.liaisonSel = keys;
+    state.liaisonPathEdges = pathEdges;
+    state.selected = keys[0];
+    modePill.hidden = false;
+    modeLabel.textContent = "Liaison : " + keys.join(" ↔ ") + " (" + union.size + " entités)";
+    setView(layoutLiaison(union, keys));
+    render();
+    fitView();
+    openDetails(keys[0]);
+    if (disconnected.length) {
+      const txt = disconnected.map(p => p[0] + " ⇿ " + p[1]).join(", ");
+      flash("Aucun lien trouvé entre : " + txt + " — entités affichées isolément.");
+    }
+  }
+
+  // Bandeau temporaire non bloquant (remplace alert()).
+  let toastTimer = 0;
+  function flash(msg) {
+    let t = document.getElementById("toast");
+    if (!t) { t = document.createElement("div"); t.id = "toast"; t.className = "toast"; canvas.appendChild(t); }
+    t.textContent = msg; t.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { t.hidden = true; }, 4800);
+  }
+
+  // Disposition en colonnes par distance depuis l'entité d'ancrage (keys[0]).
+  function layoutLiaison(union, keys) {
+    const anchor = keys[0];
+    const dist = new Map([[anchor, 0]]);
+    let frontier = [anchor];
+    while (frontier.length) {
+      const next = [];
+      for (const n of frontier) {
+        const nbrs = state.adjacency.get(n); if (!nbrs) continue;
+        for (const nb of nbrs) if (union.has(nb) && !dist.has(nb)) { dist.set(nb, dist.get(n) + 1); next.push(nb); }
+      }
+      frontier = next;
+    }
+    let maxD = 0; for (const v of dist.values()) maxD = Math.max(maxD, v);
+    const cols = new Map();
+    for (const n of union) { const d = dist.has(n) ? dist.get(n) : maxD + 1; if (!cols.has(d)) cols.set(d, []); cols.get(d).push(n); }
+    const layout = new Map();
+    let x = 0;
+    for (const d of [...cols.keys()].sort((a, b) => a - b)) {
+      const arr = cols.get(d).sort((a, b) => a.localeCompare(b));
+      let y = 0, colW = 0;
+      for (const n of arr) { const s = sizeOf(n, state.showProps); layout.set(n, { x, y, w: s.w, h: s.h }); y += s.h + 30; colW = Math.max(colW, s.w); }
+      x += colW + 120;
+    }
+    return normalize(layout);
+  }
+
   /* ----------------------------- Transform ------------------------------ */
   function applyTransform() {
     const v = state.view;
     world.style.transform = `translate(${v.tx}px, ${v.ty}px) scale(${v.scale})`;
     zoomLabel.textContent = Math.round(v.scale * 100) + "%";
+    schedulePaint();
   }
   function clampScale(s) { return Math.max(0.04, Math.min(3, s)); }
 
@@ -806,10 +1030,12 @@
     for (const c of classes) {
       const color = state.rootColor.get(c.name) || "#3b82f6";
       const nch = childrenOf(c.name).length;
-      html += `<div class="entity-row" data-name="${escapeAttr(c.name)}">
+      const inBasket = state.multiSel.has(c.name);
+      html += `<div class="entity-row${inBasket ? " in-basket" : ""}" data-name="${escapeAttr(c.name)}">
         <span class="entity-dot" style="background:${color}"></span>
         <span class="entity-name">${escapeHtml(c.name)}${c.abstract ? ' <span class="abs-tag">{a}</span>' : ""}</span>
         <span class="entity-meta">${c.props.length}p${nch ? " · " + nch + "↳" : ""}</span>
+        <button class="entity-link${inBasket ? " active" : ""}" data-link="${escapeAttr(c.name)}" title="Ajouter à la liaison">🔗</button>
         <button class="entity-focus" data-foc="${escapeAttr(c.name)}" title="Focus héritage">🔍</button>
       </div>`;
     }
@@ -1067,6 +1293,7 @@ ${sheets.map(sheetXml).join("\n")}
 
     state.files = readers.map(r => r.name);
     finalizeModel();
+    applyDefaultToggles();   // cases cochées selon la taille du corpus
     buildStats();
     buildList();
     searchEl.disabled = false; btnExportFull.disabled = false;
@@ -1109,20 +1336,143 @@ ${sheets.map(sheetXml).join("\n")}
   /* =======================================================================
    *  9.  ÉVÉNEMENTS / INTERACTIONS
    * =====================================================================*/
-  // Pan + zoom
-  let panning = false, panStart = null;
+  /* --- Modèle souris : GAUCHE = déplacer (vue / entité) ; DROIT = zone de sélection --- */
+  let drag = null;            // opération en cours
+  let suppressClick = false;  // ignore le "click" généré juste après un déplacement d'entité
+  let edgePaintReq = 0;
+  function scheduleEdgePaint() {
+    if (edgePaintReq) return;
+    edgePaintReq = requestAnimationFrame(() => { edgePaintReq = 0; paintEdges(state._region || viewportWorldRect(0.6)); });
+  }
+  function clearMultiSel() {
+    if (state.multiSel.size) state.multiSel.clear();
+    nodesLayer.querySelectorAll(".node.multi").forEach(n => n.classList.remove("multi"));
+    updateSelBar();
+  }
+  function updateSelBar() {
+    const n = state.multiSel.size;
+    // barre flottante sur le canvas
+    if (!n) { selBar.hidden = true; }
+    else {
+      selBar.hidden = false;
+      selCount.textContent = n + " entité" + (n > 1 ? "s" : "") + " sélectionnée" + (n > 1 ? "s" : "");
+      btnLiaison.disabled = n < 2;
+    }
+    renderBasket();
+    syncListLinkButtons();
+  }
+
+  // Panier de liaison dans le panneau de gauche (au-dessus de la recherche).
+  function renderBasket() {
+    const names = [...state.multiSel];
+    if (!names.length) { liaisonBasket.hidden = true; basketChips.innerHTML = ""; return; }
+    liaisonBasket.hidden = false;
+    basketChips.innerHTML = names.sort((a, b) => a.localeCompare(b)).map(nm =>
+      `<span class="lb-chip" data-go="${escapeAttr(nm)}">${escapeHtml(nm)}<span class="lb-x" data-rm="${escapeAttr(nm)}" title="Retirer">✕</span></span>`
+    ).join("");
+    btnBasketLink.disabled = names.length < 2;
+    btnBasketLink.textContent = names.length < 2 ? "Relier (2 min.)" : "Relier (" + names.length + ")";
+  }
+  // Reflète l'appartenance au panier sur les boutons 🔗 de la liste.
+  function syncListLinkButtons() {
+    listEl.querySelectorAll(".entity-row").forEach(row => {
+      const inBasket = state.multiSel.has(row.getAttribute("data-name"));
+      row.classList.toggle("in-basket", inBasket);
+      const btn = row.querySelector(".entity-link");
+      if (btn) btn.classList.toggle("active", inBasket);
+    });
+  }
+  function toggleBasket(name) {
+    if (!state.classes.has(name)) return;
+    if (state.multiSel.has(name)) state.multiSel.delete(name); else state.multiSel.add(name);
+    applySelectionClasses();
+    updateSelBar();
+  }
+
+  canvas.addEventListener("contextmenu", (e) => e.preventDefault()); // clic droit = zone de sélection
   canvas.addEventListener("mousedown", (e) => {
-    if (e.target.closest(".node")) return;
-    panning = true; canvas.classList.add("panning");
-    panStart = { x: e.clientX, y: e.clientY, tx: state.view.tx, ty: state.view.ty };
+    if (e.target.closest(".node-foc")) return; // bouton focus : géré au click
+    const nodeBox = e.target.closest(".node");
+    if (e.button === 0) {                      // --- CLIC GAUCHE : déplacer (vue ou entité) ---
+      e.preventDefault();                      // pas de sélection de texte / drag natif
+      if (nodeBox) {
+        const key = nodeBox.getAttribute("data-name");
+        const keys = state.multiSel.has(key) ? [...state.multiSel] : [key];
+        const orig = new Map();
+        for (const k of keys) { const b = state.layout.get(k); if (b) orig.set(k, { x: b.x, y: b.y }); }
+        drag = { type: "node", keys: [...orig.keys()], orig, x: e.clientX, y: e.clientY, moved: false };
+        canvas.classList.add("dragging");
+      } else {
+        drag = { type: "pan", x: e.clientX, y: e.clientY, tx: state.view.tx, ty: state.view.ty };
+        canvas.classList.add("panning");
+      }
+    } else if (e.button === 2) {               // --- CLIC DROIT : zone de sélection ---
+      e.preventDefault();
+      const r = canvas.getBoundingClientRect();
+      drag = { type: "band", x0: e.clientX, y0: e.clientY, rect: r, shift: e.shiftKey };
+      if (!e.shiftKey) clearMultiSel();
+      canvas.classList.add("selecting");
+      selBox.hidden = false;
+      updateBand(e);
+    }
   });
+
+  function updateBand(e) {
+    const x0 = drag.x0 - drag.rect.left, y0 = drag.y0 - drag.rect.top;
+    const x1 = e.clientX - drag.rect.left, y1 = e.clientY - drag.rect.top;
+    selBox.style.left = Math.min(x0, x1) + "px";
+    selBox.style.top = Math.min(y0, y1) + "px";
+    selBox.style.width = Math.abs(x1 - x0) + "px";
+    selBox.style.height = Math.abs(y1 - y0) + "px";
+  }
+  function finishBand(e) {
+    selBox.hidden = true;
+    const r = drag.rect;
+    const sx0 = Math.min(drag.x0, e.clientX) - r.left, sy0 = Math.min(drag.y0, e.clientY) - r.top;
+    const sx1 = Math.max(drag.x0, e.clientX) - r.left, sy1 = Math.max(drag.y0, e.clientY) - r.top;
+    if (sx1 - sx0 < 4 && sy1 - sy0 < 4) {        // simple clic sur le vide -> désélection
+      if (!drag.shift) { clearMultiSel(); updateSelBar(); }
+      return;
+    }
+    const s = state.view.scale;
+    const wx0 = (sx0 - state.view.tx) / s, wy0 = (sy0 - state.view.ty) / s;
+    const wx1 = (sx1 - state.view.tx) / s, wy1 = (sy1 - state.view.ty) / s;
+    for (const key of state.nodeSet) {
+      if (key.startsWith("enum::")) continue;    // la liaison ne concerne que les classes
+      const b = state.layout.get(key); if (!b) continue;
+      if (b.x < wx1 && b.x + b.w > wx0 && b.y < wy1 && b.y + b.h > wy0) state.multiSel.add(key);
+    }
+    applySelectionClasses();
+    updateSelBar();
+  }
+
   window.addEventListener("mousemove", (e) => {
-    if (!panning) return;
-    state.view.tx = panStart.tx + (e.clientX - panStart.x);
-    state.view.ty = panStart.ty + (e.clientY - panStart.y);
-    applyTransform();
+    if (!drag) return;
+    if (drag.type === "pan") {
+      state.view.tx = drag.tx + (e.clientX - drag.x);
+      state.view.ty = drag.ty + (e.clientY - drag.y);
+      applyTransform();
+    } else if (drag.type === "node") {
+      const dx = (e.clientX - drag.x) / state.view.scale, dy = (e.clientY - drag.y) / state.view.scale;
+      if (Math.abs(dx) + Math.abs(dy) > 1) drag.moved = true;
+      for (const k of drag.keys) {
+        const b = state.layout.get(k), o = drag.orig.get(k); if (!b || !o) continue;
+        b.x = o.x + dx; b.y = o.y + dy;
+        const el = nodeEl(k); if (el) { el.style.left = b.x + "px"; el.style.top = b.y + "px"; }
+      }
+      scheduleEdgePaint();
+    } else if (drag.type === "band") {
+      updateBand(e);
+    }
   });
-  window.addEventListener("mouseup", () => { panning = false; canvas.classList.remove("panning"); });
+  window.addEventListener("mouseup", (e) => {
+    if (!drag) return;
+    if (drag.type === "pan") canvas.classList.remove("panning");
+    else if (drag.type === "node") { canvas.classList.remove("dragging"); suppressClick = drag.moved; if (drag.moved) paint(); }
+    else if (drag.type === "band") { canvas.classList.remove("selecting"); finishBand(e); }
+    drag = null;
+  });
+
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
     const r = canvas.getBoundingClientRect();
@@ -1137,14 +1487,20 @@ ${sheets.map(sheetXml).join("\n")}
 
   // Clic sur les nœuds (délégation)
   nodesLayer.addEventListener("click", (e) => {
+    if (suppressClick) { suppressClick = false; return; } // déplacement d'entité, pas une sélection
     const foc = e.target.closest(".node-foc");
     if (foc) { e.stopPropagation(); enterFocus(foc.getAttribute("data-foc")); return; }
     const node = e.target.closest(".node");
-    if (node) {
-      const name = node.getAttribute("data-name");
-      if (name.startsWith("enum::")) { selectEnum(name); return; }
-      selectNode(name, false);
+    if (!node) return;
+    const name = node.getAttribute("data-name");
+    if (e.shiftKey && !name.startsWith("enum::")) {  // Maj+clic : (dé)sélection cumulative
+      if (state.multiSel.has(name)) state.multiSel.delete(name); else state.multiSel.add(name);
+      const el = nodeEl(name); if (el) el.classList.toggle("multi", state.multiSel.has(name));
+      updateSelBar();
+      return;
     }
+    if (name.startsWith("enum::")) { selectEnum(name); return; }
+    selectNode(name, false);
   });
   nodesLayer.addEventListener("dblclick", (e) => {
     const node = e.target.closest(".node");
@@ -1153,13 +1509,19 @@ ${sheets.map(sheetXml).join("\n")}
 
   // Liste
   listEl.addEventListener("click", (e) => {
+    const lnk = e.target.closest(".entity-link");
+    if (lnk) { e.stopPropagation(); toggleBasket(lnk.getAttribute("data-link")); return; }
     const foc = e.target.closest(".entity-focus");
     if (foc) { e.stopPropagation(); enterFocus(foc.getAttribute("data-foc")); return; }
     const row = e.target.closest(".entity-row");
     if (row) {
       const name = row.getAttribute("data-name");
+      if (e.shiftKey && !name.startsWith("enum::")) {  // Maj+clic dans la liste : sélection multiple
+        if (state.multiSel.has(name)) state.multiSel.delete(name); else state.multiSel.add(name);
+        applySelectionClasses(); updateSelBar(); return;
+      }
       if (name.startsWith("enum::")) { selectEnum(name); return; }
-      if (state.mode === "focus" && !state.nodeSet.has(name)) showGlobal();
+      if (state.mode !== "global" && !state.nodeSet.has(name)) showGlobal();
       selectNode(name, true);
     }
   });
@@ -1175,7 +1537,7 @@ ${sheets.map(sheetXml).join("\n")}
     const isEnum = go.getAttribute("data-enum") === "true";
     if (isEnum) return; // enums non navigables dans la liste
     if (!state.classes.has(name)) return;
-    if (state.mode === "focus" && !state.nodeSet.has(name)) showGlobal();
+    if (state.mode !== "global" && !state.nodeSet.has(name)) showGlobal();
     selectNode(name, true);
   });
 
@@ -1189,22 +1551,60 @@ ${sheets.map(sheetXml).join("\n")}
   $("btnZoomIn").addEventListener("click", () => { state.view.scale = clampScale(state.view.scale * 1.2); applyTransform(); });
   $("btnZoomOut").addEventListener("click", () => { state.view.scale = clampScale(state.view.scale / 1.2); applyTransform(); });
   $("btnFit").addEventListener("click", fitView);
-  $("btnReset").addEventListener("click", () => { if (state.mode === "focus") showGlobal(); else fitView(); });
+  $("btnReset").addEventListener("click", () => { if (state.mode !== "global") showGlobal(); else fitView(); });
   $("btnExitFocus").addEventListener("click", showGlobal);
+  btnLiaison.addEventListener("click", () => { if (state.multiSel.size >= 2) enterLiaison([...state.multiSel]); });
+  $("btnClearSel").addEventListener("click", () => { clearBasket(); });
+  btnBasketLink.addEventListener("click", () => { if (state.multiSel.size >= 2) enterLiaison([...state.multiSel]); });
+  $("btnBasketClear").addEventListener("click", () => { clearBasket(); });
+  basketChips.addEventListener("click", (e) => {
+    const rm = e.target.closest(".lb-x");
+    if (rm) { state.multiSel.delete(rm.getAttribute("data-rm")); applySelectionClasses(); updateSelBar(); return; }
+    const chip = e.target.closest(".lb-chip");
+    if (chip) { const nm = chip.getAttribute("data-go"); if (state.classes.has(nm)) { if (!state.nodeSet.has(nm)) showGlobal(); centerOn(nm, { zoom: true }); } }
+  });
+  window.addEventListener("resize", () => { if (state.classes.size) schedulePaint(); });
   btnExportFull.addEventListener("click", exportFull);
   $("btnCloseDetails").addEventListener("click", () => { detailsPanel.hidden = true; });
   $("btnDetCenter").addEventListener("click", () => { if (state.selected) { if (!state.nodeSet.has(state.selected)) showGlobal(); centerOn(state.selected, { zoom: true }); } });
   $("btnDetFocus").addEventListener("click", () => { if (state.selected) enterFocus(state.selected); });
   $("btnDetExport").addEventListener("click", () => { if (state.selected) exportFocus(state.selected); });
 
-  $("tglAssoc").addEventListener("change", (e) => { state.showAssoc = e.target.checked; render(); });
+  // Recalcule la disposition de la vue courante (global / focus / liaison).
+  function relayoutCurrent() {
+    if (state.mode === "focus" && state.focusRoot) { setView(layoutFocus(state.focusRoot)); render(); fitView(); }
+    else if (state.mode === "liaison" && state.liaisonSel.length >= 2) enterLiaison(state.liaisonSel);
+    else showGlobal();
+  }
+
+  // Coche les cases par défaut selon la taille du corpus : peu d'entités -> tout ;
+  // beaucoup -> Propriétés + Enums seulement (Associations, lourdes, restent activables).
+  function applyDefaultToggles() {
+    const small = state.classes.size <= SMALL_CORPUS;
+    if (state.showProps !== true || state.showEnums !== true) state.globalLayoutCache = null;
+    state.showProps = true; state.showEnums = true; state.showAssoc = small;
+    $("tglProps").checked = true; $("tglEnums").checked = true; $("tglAssoc").checked = small;
+    $("legend").querySelector(".lg-enum").parentElement.style.display = "";
+  }
+
+  // Vider le panier : si on regardait une liaison, on revient au global avec les cases par défaut.
+  function clearBasket() {
+    clearMultiSel();
+    if (state.mode === "liaison") { applyDefaultToggles(); showGlobal(); }
+  }
+
+  $("tglAssoc").addEventListener("change", (e) => {
+    state.showAssoc = e.target.checked;
+    if (state.mode === "focus") { setView(layoutFocus(state.focusRoot)); render(); } // les voisins assoc changent
+    else render();                                                                   // global/liaison : juste les arêtes
+  });
   $("tglProps").addEventListener("change", (e) => {
-    state.expandedGlobal = e.target.checked; state.globalLayoutCache = null;
-    if (state.mode === "global") showGlobal(); else render();
+    state.showProps = e.target.checked; state.globalLayoutCache = null;
+    relayoutCurrent(); // la taille des boîtes change dans tous les modes
   });
   $("tglEnums").addEventListener("change", (e) => {
     state.showEnums = e.target.checked; state.globalLayoutCache = null;
-    if (state.mode === "global") showGlobal(); else { setView(layoutFocus(state.focusRoot)); render(); fitView(); }
+    relayoutCurrent();
     $("legend").querySelector(".lg-enum").parentElement.style.display = state.showEnums ? "" : "none";
   });
 
@@ -1213,12 +1613,15 @@ ${sheets.map(sheetXml).join("\n")}
     depthVal.textContent = state.depthLimit >= 20 ? "∞" : String(state.depthLimit);
     state.globalLayoutCache = null;
     if (!state.classes.size) return;
-    if (state.mode === "global") showGlobal();
-    else { setView(layoutFocus(state.focusRoot)); render(); fitView(); }
+    relayoutCurrent();
   });
 
   window.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { if (state.mode === "focus") showGlobal(); else if (!detailsPanel.hidden) detailsPanel.hidden = true; }
+    if (e.key === "Escape") {
+      if (state.multiSel.size) { clearMultiSel(); updateSelBar(); }
+      else if (state.mode !== "global") showGlobal();
+      else if (!detailsPanel.hidden) detailsPanel.hidden = true;
+    }
     if (e.key === "/" && document.activeElement !== searchEl) { e.preventDefault(); searchEl.focus(); }
   });
   $("legend").hidden = false;
@@ -1229,6 +1632,11 @@ ${sheets.map(sheetXml).join("\n")}
   function escapeAttr(s) { return escapeHtml(s).replace(/'/g, "&#39;"); }
   function escapeXml(s) { return String(s).replace(/[&<>"']/g, m => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" }[m])); }
   function cssEsc(s) { return (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/["\\]/g, "\\$&"); }
+
+  // Chargement sans sélecteur de dossier : liste d'URL .xsd (debug / corpus embarqué).
+  window.__loadXsdUrls = function (urls) {
+    return loadReaders(urls.map(u => ({ name: u.split("/").pop(), read: async () => (await fetch(u)).text() })));
+  };
 
   // Accès en lecture du modèle reconstruit (debug / vérification croisée avec les XSD)
   window.__dumpModel = function () {

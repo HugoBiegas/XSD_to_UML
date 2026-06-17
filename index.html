@@ -78,11 +78,24 @@
         </div>
       </div>
 
+      <!-- Boîte de sélection (rubber-band, clic gauche) -->
+      <div id="selBox" class="sel-box" hidden></div>
+
+      <!-- Barre d'actions sur la sélection multiple -->
+      <div id="selBar" class="sel-bar" hidden>
+        <span id="selCount" class="sel-count"></span>
+        <button id="btnLiaison" class="tool small" title="Afficher comment les entités sélectionnées sont reliées">🔗 Relier</button>
+        <button id="btnClearSel" class="tool small" title="Tout désélectionner">✖ Effacer</button>
+      </div>
+
       <!-- Légende -->
       <div id="legend" class="legend" hidden>
+        <div class="legend-title">Légende</div>
         <div class="legend-row"><span class="lg-inh"></span> Héritage (généralisation)</div>
         <div class="legend-row"><span class="lg-assoc"></span> Association</div>
         <div class="legend-row"><span class="lg-enum"></span> Énumération</div>
+        <div class="legend-sep"></div>
+        <div class="legend-hint">Clic gauche = déplacer la vue / l'entité · Clic droit (glisser) = sélectionner</div>
       </div>
     </section>
 
@@ -91,6 +104,16 @@
       <button id="btnPick" class="tool primary big block">📁 Choisir un dossier</button>
 
       <div id="stats" class="stats" hidden></div>
+
+      <!-- Panier de liaison : entités à relier (alimenté par le bouton 🔗 des lignes) -->
+      <div id="liaisonBasket" class="liaison-basket" hidden>
+        <div class="lb-head">
+          <span class="lb-title">🔗 Entités à relier</span>
+          <button id="btnBasketClear" class="link" title="Vider la sélection">vider</button>
+        </div>
+        <div id="basketChips" class="lb-chips"></div>
+        <button id="btnBasketLink" class="tool primary block" disabled>Relier</button>
+      </div>
 
       <div class="search-wrap">
         <input id="search" type="search" placeholder="🔎 Rechercher une entité…" autocomplete="off" disabled />
