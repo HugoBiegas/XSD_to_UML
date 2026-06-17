@@ -177,8 +177,8 @@ Les trois cases pilotent **global ET focus**. Effet :
 | Entrée en **focus**, corpus **petit** (≤ 120 entités) | **tout coché** (props + enums + assoc). |
 | Entrée en **focus**, corpus **grand** (> 120) | **Propriétés seule** (enums + assoc décochés, activables). |
 
-- Cocher/décocher applique le changement **sans recadrer** la vue (l'écran ne saute pas ; seul le
-  contenu change). Le re-layout éventuel garde la transformation de caméra courante.
+- Cocher/décocher **recadre** la vue (retour à l'affichage cadré : `frameGlobal` en global, `fitView`
+  en focus/liaison), pour revenir à un état lisible plutôt que de rester sur la position courante.
 - Seuil `SMALL_CORPUS` = 120 entités (constante ajustable dans `app.js`).
 
 ---

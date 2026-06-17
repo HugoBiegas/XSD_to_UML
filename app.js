@@ -1640,11 +1640,11 @@ ${sheets.map(sheetXml).join("\n")}
   $("btnDetFocus").addEventListener("click", () => { if (state.selected) enterFocus(state.selected); });
   $("btnDetExport").addEventListener("click", () => { if (state.selected) exportFocus(state.selected); });
 
-  // Recalcule la disposition de la vue courante SANS recadrer (l'écran ne saute pas).
-  function relayoutKeepView() {
-    if (state.mode === "focus" && state.focusRoot) { setView(layoutFocus(state.focusRoot)); render(); }
-    else if (state.mode === "liaison" && state.liaisonUnion) { setView(layoutLiaison(state.liaisonUnion, state.liaisonSel)); render(); }
-    else showGlobal(true); // global, sans recadrer
+  // Recalcule la disposition de la vue courante ET recadre (retour à l'état initial cadré).
+  function relayoutCurrent() {
+    if (state.mode === "focus" && state.focusRoot) { setView(layoutFocus(state.focusRoot)); render(); fitView(); }
+    else if (state.mode === "liaison" && state.liaisonUnion) { setView(layoutLiaison(state.liaisonUnion, state.liaisonSel)); render(); fitView(); }
+    else showGlobal(); // global -> frameGlobal (recadre)
   }
 
   // État des cases selon le mode : global = rien (juste les entités) ; focus = selon la taille
@@ -1666,18 +1666,15 @@ ${sheets.map(sheetXml).join("\n")}
     if (state.mode === "liaison") goGlobal();
   }
 
-  $("tglAssoc").addEventListener("change", (e) => {
-    state.showAssoc = e.target.checked;
-    if (state.mode === "focus") { setView(layoutFocus(state.focusRoot)); render(); } // les voisins assoc changent
-    else render();                                                                   // global/liaison : juste les arêtes
-  });
+  // Cocher/décocher une case recadre la vue (retour à l'état initial), au lieu de rester sur place.
+  $("tglAssoc").addEventListener("change", (e) => { state.showAssoc = e.target.checked; relayoutCurrent(); });
   $("tglProps").addEventListener("change", (e) => {
     state.showProps = e.target.checked; state.globalLayoutCache = null;
-    relayoutKeepView(); // la taille des boîtes change dans tous les modes, sans recadrer
+    relayoutCurrent();
   });
   $("tglEnums").addEventListener("change", (e) => {
     state.showEnums = e.target.checked; state.globalLayoutCache = null;
-    relayoutKeepView();
+    relayoutCurrent();
     $("legend").querySelector(".lg-enum").parentElement.style.display = state.showEnums ? "" : "none";
   });
 
@@ -1686,7 +1683,7 @@ ${sheets.map(sheetXml).join("\n")}
     depthVal.textContent = state.depthLimit >= 20 ? "∞" : String(state.depthLimit);
     state.globalLayoutCache = null;
     if (!state.classes.size) return;
-    relayoutKeepView();
+    relayoutCurrent();
   });
 
   window.addEventListener("keydown", (e) => {

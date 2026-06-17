@@ -81,7 +81,7 @@ automatiquement au mode pour rester fluide :
 - **Focus** (en entrant) : les cases sont **re-cochées selon la taille du corpus** —
   **peu d'entités** (≤ ~120) → **tout coché** (propriétés, enums, associations) ;
   **beaucoup d'entités** → **Propriétés seule** (enums et associations, lourds, restent activables à la demande).
-- Cocher / décocher une case applique le changement **sans recadrer la vue** (l'écran ne saute pas).
+- Cocher / décocher une case **recadre la vue** (retour à l'affichage cadré de l'état courant).
 
 > Vider le panier de liaison (« vider ») ramène à la **vue globale** (toutes cases décochées).
 
