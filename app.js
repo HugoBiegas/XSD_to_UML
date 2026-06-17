@@ -53,6 +53,7 @@
 
     adjacency: new Map(),      // name -> Set(voisins) (héritage + assoc, non orienté) — pour la liaison
     liaisonSel: [],            // entités d'origine d'une liaison
+    liaisonUnion: null,        // Set des entités du sous-graphe de liaison courant
     liaisonPathEdges: new Set(),// arêtes "a|b" appartenant aux chemins de liaison (surbrillance)
 
     layout: new Map(),         // name|enum::name -> {x,y,w,h}
@@ -85,7 +86,7 @@
   const modePill = $("modePill"), modeLabel = $("modeLabel");
   const btnExportFull = $("btnExportFull");
   const selBox = $("selBox"), selBar = $("selBar"), selCount = $("selCount"), btnLiaison = $("btnLiaison");
-  const liaisonBasket = $("liaisonBasket"), basketChips = $("basketChips"), btnBasketLink = $("btnBasketLink");
+  const liaisonBasket = $("liaisonBasket"), basketChips = $("basketChips"), btnBasketLink = $("btnBasketLink"), btnBasketExcel = $("btnBasketExcel");
 
   const mctx = document.createElement("canvas").getContext("2d");
   function measure(text, font) { mctx.font = font; return mctx.measureText(text).width; }
@@ -283,8 +284,9 @@
   }
 
   // Graphe non orienté (héritage + associations entre classes) pour le calcul des liaisons.
-  // Les "conteneurs" (types-document listant des refs) sont exclus : sinon presque toutes les
-  // entités seraient reliées trivialement via le même conteneur, ce qui n'a aucun sens.
+  // Tous les types sont inclus (conteneurs compris) : un conteneur peut être une EXTRÉMITÉ
+  // valide (ex. alignement ↔ alignements). En revanche le BFS n'autorise pas à TRAVERSER un
+  // conteneur non sélectionné (sinon presque tout serait relié trivialement) — voir bfsPred().
   function buildAdjacency() {
     const adj = new Map();
     const link = (a, b) => {
@@ -293,12 +295,11 @@
       adj.get(a).add(b);
     };
     for (const [name, c] of state.classes) {
-      if (isContainer(name)) continue;
       const b = baseOf(name);
-      if (b && !isContainer(b)) { link(name, b); link(b, name); }
+      if (b) { link(name, b); link(b, name); }
       for (const p of c.props) {
         const rt = refTypeOf(p);
-        if (rt && state.classes.has(rt) && !isContainer(rt)) { link(name, rt); link(rt, name); }
+        if (rt && state.classes.has(rt)) { link(name, rt); link(rt, name); }
       }
     }
     state.adjacency = adj;
@@ -648,7 +649,10 @@
   // et seules celles proches de la zone rendue sont tracées. Énorme gain de DOM/SVG.
   function paintEdges(region) {
     const L = state.layout;
-    const showLabels = (state.mode === "focus" || state.mode === "liaison") && state._lod === "full";
+    // LOD des arêtes : au zoom éloigné (mini) -> traits pleins fins, SANS flèches ni pointillés
+    // ni libellés (illisibles à cette échelle), ce qui supprime le gros coût de rastérisation.
+    const mini = state._lod === "mini";
+    const showLabels = !mini && (state.mode === "focus" || state.mode === "liaison") && state._lod === "full";
     let dInh = "", dAssoc = "", dEnum = "", aInh = "", aAssoc = "", aEnum = "", dLia = "", labels = "";
     let nLabels = 0;
     const liaison = state.mode === "liaison" && state.liaisonPathEdges.size;
@@ -658,25 +662,30 @@
       if (region && !edgeNearRegion(a, b, region)) continue;
       const acx = a.x + a.w / 2, acy = a.y + a.h / 2, bcx = b.x + b.w / 2, bcy = b.y + b.h / 2;
       const pa = borderPoint(a, bcx, bcy), pb = borderPoint(b, acx, acy);
-      const len = Math.hypot(pb.x - pa.x, pb.y - pa.y) || 1;
-      const ux = (pb.x - pa.x) / len, uy = (pb.y - pa.y) / len;
       let d;
       if (e.kind === "inh") {
         const my = (pa.y + pb.y) / 2;
         d = `M${r0(pa.x)},${r0(pa.y)} C${r0(pa.x)},${r0(my)} ${r0(pb.x)},${r0(my)} ${r0(pb.x)},${r0(pb.y)}`;
-        dInh += d; aInh += arrowTri(pb, ux, uy, 12);
+        dInh += d;
       } else {
         const mx = (pa.x + pb.x) / 2;
         d = `M${r0(pa.x)},${r0(pa.y)} C${r0(mx)},${r0(pa.y)} ${r0(mx)},${r0(pb.y)} ${r0(pb.x)},${r0(pb.y)}`;
-        if (e.kind === "enum") { dEnum += d; aEnum += arrowChevron(pb, ux, uy, 10); }
-        else { dAssoc += d; aAssoc += arrowChevron(pb, ux, uy, 10); }
+        if (e.kind === "enum") dEnum += d; else dAssoc += d;
         if (showLabels && e.label && nLabels < 140) {
           labels += `<text class="e-label" x="${r0((pa.x + pb.x) / 2)}" y="${r0((pa.y + pb.y) / 2 - 3)}">${escapeHtml(e.label)}</text>`;
           nLabels++;
         }
       }
+      if (!mini) {                                 // flèches seulement quand c'est lisible
+        const len = Math.hypot(pb.x - pa.x, pb.y - pa.y) || 1;
+        const ux = (pb.x - pa.x) / len, uy = (pb.y - pa.y) / len;
+        if (e.kind === "inh") aInh += arrowTri(pb, ux, uy, 12);
+        else if (e.kind === "enum") aEnum += arrowChevron(pb, ux, uy, 10);
+        else aAssoc += arrowChevron(pb, ux, uy, 10);
+      }
       if (liaison && state.liaisonPathEdges.has(edgeKey(e.from, e.to))) dLia += d;
     }
+    edgesSvg.classList.toggle("lod-mini", mini);
     let svg = "";
     if (dLia) svg += `<path class="e-lia" d="${dLia}"/>`;       // surbrillance sous les arêtes
     if (dInh) svg += `<path class="e-inh" d="${dInh}"/>`;
@@ -812,18 +821,26 @@
     state.nodeSet = new Set(state.layout.keys());
   }
 
-  function showGlobal() {
+  // keepView=true : on ne recadre pas (utilisé quand une case change -> l'écran ne bouge pas).
+  function showGlobal(keepView) {
     state.mode = "global";
     state.focusRoot = null;
-    state.liaisonSel = []; state.liaisonPathEdges = new Set();
+    state.liaisonSel = []; state.liaisonUnion = null; state.liaisonPathEdges = new Set();
     modePill.hidden = true;
+    hideToast();
     if (!state.globalLayoutCache || state.globalLayoutCache.expanded !== state.showProps || state.globalLayoutCache.enums !== state.showEnums || state.globalLayoutCache.depth !== state.depthLimit) {
       const gl = layoutGlobal();
       state.globalLayoutCache = { ...gl, expanded: state.showProps, enums: state.showEnums, depth: state.depthLimit };
     }
     setView(state.globalLayoutCache);
     render();
-    frameGlobal();
+    if (!keepView) frameGlobal();
+  }
+
+  // Retour à la vue globale "utilisateur" : décoche toutes les cases (juste les entités) puis cadre.
+  function goGlobal() {
+    applyModeToggles("global");
+    showGlobal();
   }
 
   function enterFocus(name) {
@@ -831,7 +848,9 @@
     state.mode = "focus";
     state.focusRoot = name;
     state.selected = name;
-    state.liaisonSel = []; state.liaisonPathEdges = new Set();
+    state.liaisonSel = []; state.liaisonUnion = null; state.liaisonPathEdges = new Set();
+    hideToast();
+    applyModeToggles("focus");   // recoche selon la taille du corpus
     modePill.hidden = false;
     modeLabel.textContent = "Focus : " + name;
     setView(layoutFocus(name));
@@ -841,12 +860,14 @@
   }
 
   /* ----------------------------- LIAISON --------------------------------- */
-  // Plus court chemin (BFS) sur le graphe non orienté héritage+associations.
-  function bfsPred(start) {
+  // BFS sur le graphe non orienté. On peut ATTEINDRE n'importe quel nœud, mais on n'EXPAND
+  // (ne traverse) pas un conteneur non sélectionné : il peut être une extrémité, jamais un relais.
+  function bfsPred(start, allowSet) {
     const pred = new Map(); pred.set(start, null);
     const q = [start]; let h = 0;
     while (h < q.length) {
       const n = q[h++];
+      if (n !== start && isContainer(n) && !allowSet.has(n)) continue; // pas de traversée d'un conteneur
       const nbrs = state.adjacency.get(n); if (!nbrs) continue;
       for (const nb of nbrs) if (!pred.has(nb)) { pred.set(nb, n); q.push(nb); }
     }
@@ -859,51 +880,73 @@
     return path.reverse();
   }
 
-  // Affiche le sous-graphe reliant 2+ entités (chemins les plus courts entre toutes les paires).
-  function enterLiaison(keys) {
+  // Calcule le sous-graphe de connexion entre 2+ entités (réutilisé par l'affichage ET l'export).
+  function computeLiaison(keys) {
     keys = [...new Set(keys.filter(k => state.classes.has(k)))];
-    if (keys.length < 2) return;
+    const allow = new Set(keys);
     const union = new Set(keys);
     const pathEdges = new Set();
+    const pairs = [];
     const preds = new Map();
-    for (const k of keys) preds.set(k, bfsPred(k));
-    const disconnected = [];
+    for (const k of keys) preds.set(k, bfsPred(k, allow));
     for (let i = 0; i < keys.length; i++) {
       for (let j = i + 1; j < keys.length; j++) {
         const path = pathBetween(preds.get(keys[i]), keys[j]);
-        if (!path) { disconnected.push([keys[i], keys[j]]); continue; }
+        pairs.push({ a: keys[i], b: keys[j], path });
+        if (!path) continue;
         for (let t = 0; t < path.length; t++) {
           union.add(path[t]);
           if (t) pathEdges.add(edgeKey(path[t - 1], path[t]));
         }
       }
     }
-    state.mode = "liaison";
-    state.focusRoot = null;
-    state.liaisonSel = keys;
-    state.liaisonPathEdges = pathEdges;
-    state.selected = keys[0];
-    modePill.hidden = false;
-    modeLabel.textContent = "Liaison : " + keys.join(" ↔ ") + " (" + union.size + " entités)";
-    setView(layoutLiaison(union, keys));
-    render();
-    fitView();
-    openDetails(keys[0]);
-    if (disconnected.length) {
-      const txt = disconnected.map(p => p[0] + " ⇿ " + p[1]).join(", ");
-      flash("Aucun lien trouvé entre : " + txt + " — entités affichées isolément.");
-    }
+    return { keys, union, pathEdges, pairs };
   }
 
-  // Bandeau temporaire non bloquant (remplace alert()).
+  // Étiquette de relation entre deux entités adjacentes (héritage ou association).
+  function relationLabel(a, b) {
+    if (baseOf(a) === b) return a + " hérite de " + b;
+    if (baseOf(b) === a) return b + " hérite de " + a;
+    const ca = state.classes.get(a);
+    if (ca) for (const p of ca.props) if (refTypeOf(p) === b) return a + "." + p.name + " → " + b + " (association)";
+    const cb = state.classes.get(b);
+    if (cb) for (const p of cb.props) if (refTypeOf(p) === a) return b + "." + p.name + " → " + a + " (association)";
+    return a + " — " + b;
+  }
+
+  // Affiche le sous-graphe reliant 2+ entités (chemins les plus courts entre toutes les paires).
+  function enterLiaison(keys) {
+    const { keys: ks, union, pathEdges, pairs } = computeLiaison(keys);
+    if (ks.length < 2) return;
+    state.mode = "liaison";
+    state.focusRoot = null;
+    state.liaisonSel = ks;
+    state.liaisonUnion = union;
+    state.liaisonPathEdges = pathEdges;
+    state.selected = ks[0];
+    modePill.hidden = false;
+    modeLabel.textContent = "Liaison : " + ks.join(" ↔ ") + " (" + union.size + " entités)";
+    setView(layoutLiaison(union, ks));
+    render();
+    fitView();
+    openDetails(ks[0]);
+    const disconnected = pairs.filter(p => !p.path);
+    if (disconnected.length) {
+      const txt = disconnected.map(p => p.a + " ⇿ " + p.b).join(", ");
+      flash("Aucun lien trouvé entre : " + txt + " — entités affichées isolément.", true);
+    } else hideToast();
+  }
+
+  // Bandeau non bloquant. persist=true -> reste affiché jusqu'à hideToast() (changement de mode).
   let toastTimer = 0;
-  function flash(msg) {
+  function flash(msg, persist) {
     let t = document.getElementById("toast");
     if (!t) { t = document.createElement("div"); t.id = "toast"; t.className = "toast"; canvas.appendChild(t); }
     t.textContent = msg; t.hidden = false;
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => { t.hidden = true; }, 4800);
+    if (!persist) toastTimer = setTimeout(() => { t.hidden = true; }, 4800);
   }
+  function hideToast() { const t = document.getElementById("toast"); if (t) t.hidden = true; clearTimeout(toastTimer); }
 
   // Disposition en colonnes par distance depuis l'entité d'ancrage (keys[0]).
   function layoutLiaison(union, keys) {
@@ -1243,6 +1286,35 @@ ${sheets.map(sheetXml).join("\n")}
     downloadWorkbook("XSD_UML_focus_" + name + ".xls", [info, props, tree, asso]);
   }
 
+  // Export Excel d'une LIAISON : entités sélectionnées + chemins de connexion + sous-graphe.
+  function exportLiaison(keys) {
+    const { keys: ks, union, pairs } = computeLiaison(keys);
+    if (ks.length < 2) return;
+    const summary = { name: "Liaison", cols: [220, 220, 90, 70, 520], header:
+      ["Entité A", "Entité B", "Reliées", "Sauts", "Chemin"], rows: [] };
+    for (const pr of pairs) {
+      if (!pr.path) { summary.rows.push([pr.a, pr.b, "non", "", "(aucun lien trouvé)"]); continue; }
+      summary.rows.push([pr.a, pr.b, "oui", pr.path.length - 1, pr.path.join("  →  ")]);
+    }
+    const steps = { name: "Chemins (détail)", cols: [240, 60, 220, 220, 320], header:
+      ["Paire", "Étape", "De", "Vers", "Relation"], rows: [] };
+    for (const pr of pairs) {
+      if (!pr.path) { steps.rows.push([pr.a + " ↔ " + pr.b, "", "", "", "aucun lien"]); continue; }
+      for (let i = 1; i < pr.path.length; i++) steps.rows.push([pr.a + " ↔ " + pr.b, i, pr.path[i - 1], pr.path[i], relationLabel(pr.path[i - 1], pr.path[i])]);
+    }
+    const ent = { name: "Entités du graphe", cols: [240, 70, 220, 220, 80, 90], header:
+      ["Entité", "Sélectionnée", "Abstrait", "Parent", "Racine (famille)", "Nb props"], rows: [] };
+    const selSet = new Set(ks);
+    for (const n of [...union].sort((a, b) => a.localeCompare(b))) {
+      const c = state.classes.get(n); if (!c) continue;
+      ent.rows.push([n, selSet.has(n) ? "oui" : "", c.abstract ? "oui" : "", baseOf(n) || "", rootOf(n), c.props.length]);
+    }
+    const asso = { name: "Associations", cols: [240, 200, 240, 90], header: ["Source", "Propriété", "Cible", "Cardinalité"], rows: [] };
+    for (const n of [...union].sort((a, b) => a.localeCompare(b))) for (const a of assocOf(n)) if (union.has(a.target)) asso.rows.push([n, a.prop, a.target, a.card]);
+    const fname = "XSD_UML_liaison_" + ks.join("-").replace(/[^\w-]/g, "").slice(0, 50) + ".xls";
+    downloadWorkbook(fname, [summary, steps, ent, asso]);
+  }
+
   /* =======================================================================
    *  8.  CHARGEMENT DES FICHIERS
    * =====================================================================*/
@@ -1293,7 +1365,7 @@ ${sheets.map(sheetXml).join("\n")}
 
     state.files = readers.map(r => r.name);
     finalizeModel();
-    applyDefaultToggles();   // cases cochées selon la taille du corpus
+    applyModeToggles("global"); // vue globale = cases décochées (juste les entités)
     buildStats();
     buildList();
     searchEl.disabled = false; btnExportFull.disabled = false;
@@ -1314,7 +1386,7 @@ ${sheets.map(sheetXml).join("\n")}
       <div>Fichiers&nbsp;: <b>${state.files.length}</b></div>
       <div>Entités&nbsp;: <b>${state.classes.size}</b></div>
       <div>Énums&nbsp;: <b>${state.enums.size}</b></div>
-      <div>Profondeur max&nbsp;: <b>${maxDepth}</b></div>`;
+      <div>Profondeur max&nbsp;: <b>20</b></div>`;
   }
 
   async function pickDirectory() {
@@ -1372,6 +1444,7 @@ ${sheets.map(sheetXml).join("\n")}
     ).join("");
     btnBasketLink.disabled = names.length < 2;
     btnBasketLink.textContent = names.length < 2 ? "Relier (2 min.)" : "Relier (" + names.length + ")";
+    btnBasketExcel.disabled = names.length < 2;
   }
   // Reflète l'appartenance au panier sur les boutons 🔗 de la liste.
   function syncListLinkButtons() {
@@ -1394,6 +1467,8 @@ ${sheets.map(sheetXml).join("\n")}
     if (e.target.closest(".node-foc")) return; // bouton focus : géré au click
     const nodeBox = e.target.closest(".node");
     if (e.button === 0) {                      // --- CLIC GAUCHE : déplacer (vue ou entité) ---
+      // Ctrl/⌘ + clic gauche sur une entité = (dé)sélection pour la liaison -> géré au "click"
+      if ((e.ctrlKey || e.metaKey) && nodeBox && !nodeBox.getAttribute("data-name").startsWith("enum::")) return;
       e.preventDefault();                      // pas de sélection de texte / drag natif
       if (nodeBox) {
         const key = nodeBox.getAttribute("data-name");
@@ -1406,11 +1481,11 @@ ${sheets.map(sheetXml).join("\n")}
         drag = { type: "pan", x: e.clientX, y: e.clientY, tx: state.view.tx, ty: state.view.ty };
         canvas.classList.add("panning");
       }
-    } else if (e.button === 2) {               // --- CLIC DROIT : zone de sélection ---
+    } else if (e.button === 2) {               // --- CLIC DROIT : zone de sélection (cumulative) ---
       e.preventDefault();
       const r = canvas.getBoundingClientRect();
-      drag = { type: "band", x0: e.clientX, y0: e.clientY, rect: r, shift: e.shiftKey };
-      if (!e.shiftKey) clearMultiSel();
+      // On N'EFFACE PAS la sélection existante : chaque zone AJOUTE un groupe.
+      drag = { type: "band", x0: e.clientX, y0: e.clientY, rect: r };
       canvas.classList.add("selecting");
       selBox.hidden = false;
       updateBand(e);
@@ -1430,10 +1505,7 @@ ${sheets.map(sheetXml).join("\n")}
     const r = drag.rect;
     const sx0 = Math.min(drag.x0, e.clientX) - r.left, sy0 = Math.min(drag.y0, e.clientY) - r.top;
     const sx1 = Math.max(drag.x0, e.clientX) - r.left, sy1 = Math.max(drag.y0, e.clientY) - r.top;
-    if (sx1 - sx0 < 4 && sy1 - sy0 < 4) {        // simple clic sur le vide -> désélection
-      if (!drag.shift) { clearMultiSel(); updateSelBar(); }
-      return;
-    }
+    if (sx1 - sx0 < 4 && sy1 - sy0 < 4) return;  // clic droit sans glissement -> rien (on cumule)
     const s = state.view.scale;
     const wx0 = (sx0 - state.view.tx) / s, wy0 = (sy0 - state.view.ty) / s;
     const wx1 = (sx1 - state.view.tx) / s, wy1 = (sy1 - state.view.ty) / s;
@@ -1493,10 +1565,8 @@ ${sheets.map(sheetXml).join("\n")}
     const node = e.target.closest(".node");
     if (!node) return;
     const name = node.getAttribute("data-name");
-    if (e.shiftKey && !name.startsWith("enum::")) {  // Maj+clic : (dé)sélection cumulative
-      if (state.multiSel.has(name)) state.multiSel.delete(name); else state.multiSel.add(name);
-      const el = nodeEl(name); if (el) el.classList.toggle("multi", state.multiSel.has(name));
-      updateSelBar();
+    if ((e.ctrlKey || e.metaKey || e.shiftKey) && !name.startsWith("enum::")) { // Ctrl/⌘/Maj+clic : (dé)sélection liaison
+      toggleBasket(name);
       return;
     }
     if (name.startsWith("enum::")) { selectEnum(name); return; }
@@ -1516,12 +1586,11 @@ ${sheets.map(sheetXml).join("\n")}
     const row = e.target.closest(".entity-row");
     if (row) {
       const name = row.getAttribute("data-name");
-      if (e.shiftKey && !name.startsWith("enum::")) {  // Maj+clic dans la liste : sélection multiple
-        if (state.multiSel.has(name)) state.multiSel.delete(name); else state.multiSel.add(name);
-        applySelectionClasses(); updateSelBar(); return;
+      if ((e.ctrlKey || e.metaKey || e.shiftKey) && !name.startsWith("enum::")) { // Ctrl/⌘/Maj+clic : liaison
+        toggleBasket(name); return;
       }
       if (name.startsWith("enum::")) { selectEnum(name); return; }
-      if (state.mode !== "global" && !state.nodeSet.has(name)) showGlobal();
+      if (state.mode !== "global" && !state.nodeSet.has(name)) goGlobal();
       selectNode(name, true);
     }
   });
@@ -1551,46 +1620,50 @@ ${sheets.map(sheetXml).join("\n")}
   $("btnZoomIn").addEventListener("click", () => { state.view.scale = clampScale(state.view.scale * 1.2); applyTransform(); });
   $("btnZoomOut").addEventListener("click", () => { state.view.scale = clampScale(state.view.scale / 1.2); applyTransform(); });
   $("btnFit").addEventListener("click", fitView);
-  $("btnReset").addEventListener("click", () => { if (state.mode !== "global") showGlobal(); else fitView(); });
-  $("btnExitFocus").addEventListener("click", showGlobal);
+  $("btnReset").addEventListener("click", () => { if (state.mode !== "global") goGlobal(); else fitView(); });
+  $("btnExitFocus").addEventListener("click", goGlobal);
   btnLiaison.addEventListener("click", () => { if (state.multiSel.size >= 2) enterLiaison([...state.multiSel]); });
   $("btnClearSel").addEventListener("click", () => { clearBasket(); });
   btnBasketLink.addEventListener("click", () => { if (state.multiSel.size >= 2) enterLiaison([...state.multiSel]); });
+  btnBasketExcel.addEventListener("click", () => { if (state.multiSel.size >= 2) exportLiaison([...state.multiSel]); });
   $("btnBasketClear").addEventListener("click", () => { clearBasket(); });
   basketChips.addEventListener("click", (e) => {
     const rm = e.target.closest(".lb-x");
     if (rm) { state.multiSel.delete(rm.getAttribute("data-rm")); applySelectionClasses(); updateSelBar(); return; }
     const chip = e.target.closest(".lb-chip");
-    if (chip) { const nm = chip.getAttribute("data-go"); if (state.classes.has(nm)) { if (!state.nodeSet.has(nm)) showGlobal(); centerOn(nm, { zoom: true }); } }
+    if (chip) { const nm = chip.getAttribute("data-go"); if (state.classes.has(nm)) { if (!state.nodeSet.has(nm)) goGlobal(); centerOn(nm, { zoom: true }); } }
   });
   window.addEventListener("resize", () => { if (state.classes.size) schedulePaint(); });
   btnExportFull.addEventListener("click", exportFull);
   $("btnCloseDetails").addEventListener("click", () => { detailsPanel.hidden = true; });
-  $("btnDetCenter").addEventListener("click", () => { if (state.selected) { if (!state.nodeSet.has(state.selected)) showGlobal(); centerOn(state.selected, { zoom: true }); } });
+  $("btnDetCenter").addEventListener("click", () => { if (state.selected) { if (!state.nodeSet.has(state.selected)) goGlobal(); centerOn(state.selected, { zoom: true }); } });
   $("btnDetFocus").addEventListener("click", () => { if (state.selected) enterFocus(state.selected); });
   $("btnDetExport").addEventListener("click", () => { if (state.selected) exportFocus(state.selected); });
 
-  // Recalcule la disposition de la vue courante (global / focus / liaison).
-  function relayoutCurrent() {
-    if (state.mode === "focus" && state.focusRoot) { setView(layoutFocus(state.focusRoot)); render(); fitView(); }
-    else if (state.mode === "liaison" && state.liaisonSel.length >= 2) enterLiaison(state.liaisonSel);
-    else showGlobal();
+  // Recalcule la disposition de la vue courante SANS recadrer (l'écran ne saute pas).
+  function relayoutKeepView() {
+    if (state.mode === "focus" && state.focusRoot) { setView(layoutFocus(state.focusRoot)); render(); }
+    else if (state.mode === "liaison" && state.liaisonUnion) { setView(layoutLiaison(state.liaisonUnion, state.liaisonSel)); render(); }
+    else showGlobal(true); // global, sans recadrer
   }
 
-  // Coche les cases par défaut selon la taille du corpus : peu d'entités -> tout ;
-  // beaucoup -> Propriétés + Enums seulement (Associations, lourdes, restent activables).
-  function applyDefaultToggles() {
+  // État des cases selon le mode : global = rien (juste les entités) ; focus = selon la taille
+  // du corpus (peu -> tout ; beaucoup -> Propriétés seules, Assoc/Enums lourdes restent activables).
+  function applyModeToggles(mode) {
     const small = state.classes.size <= SMALL_CORPUS;
-    if (state.showProps !== true || state.showEnums !== true) state.globalLayoutCache = null;
-    state.showProps = true; state.showEnums = true; state.showAssoc = small;
-    $("tglProps").checked = true; $("tglEnums").checked = true; $("tglAssoc").checked = small;
-    $("legend").querySelector(".lg-enum").parentElement.style.display = "";
+    let p, e, a;
+    if (mode === "global") { p = false; e = false; a = false; }
+    else { p = true; e = small; a = small; } // focus
+    if (state.showProps !== p || state.showEnums !== e) state.globalLayoutCache = null;
+    state.showProps = p; state.showEnums = e; state.showAssoc = a;
+    $("tglProps").checked = p; $("tglEnums").checked = e; $("tglAssoc").checked = a;
+    $("legend").querySelector(".lg-enum").parentElement.style.display = e ? "" : "none";
   }
 
-  // Vider le panier : si on regardait une liaison, on revient au global avec les cases par défaut.
+  // Vider le panier : si on regardait une liaison, on revient à la vue globale (cases décochées).
   function clearBasket() {
     clearMultiSel();
-    if (state.mode === "liaison") { applyDefaultToggles(); showGlobal(); }
+    if (state.mode === "liaison") goGlobal();
   }
 
   $("tglAssoc").addEventListener("change", (e) => {
@@ -1600,11 +1673,11 @@ ${sheets.map(sheetXml).join("\n")}
   });
   $("tglProps").addEventListener("change", (e) => {
     state.showProps = e.target.checked; state.globalLayoutCache = null;
-    relayoutCurrent(); // la taille des boîtes change dans tous les modes
+    relayoutKeepView(); // la taille des boîtes change dans tous les modes, sans recadrer
   });
   $("tglEnums").addEventListener("change", (e) => {
     state.showEnums = e.target.checked; state.globalLayoutCache = null;
-    relayoutCurrent();
+    relayoutKeepView();
     $("legend").querySelector(".lg-enum").parentElement.style.display = state.showEnums ? "" : "none";
   });
 
@@ -1613,13 +1686,13 @@ ${sheets.map(sheetXml).join("\n")}
     depthVal.textContent = state.depthLimit >= 20 ? "∞" : String(state.depthLimit);
     state.globalLayoutCache = null;
     if (!state.classes.size) return;
-    relayoutCurrent();
+    relayoutKeepView();
   });
 
   window.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       if (state.multiSel.size) { clearMultiSel(); updateSelBar(); }
-      else if (state.mode !== "global") showGlobal();
+      else if (state.mode !== "global") goGlobal();
       else if (!detailsPanel.hidden) detailsPanel.hidden = true;
     }
     if (e.key === "/" && document.activeElement !== searchEl) { e.preventDefault(); searchEl.focus(); }

@@ -65,21 +65,25 @@ En `http://localhost`, l'app utilise l'API moderne `showDirectoryPicker` (sélec
 
 ### Cases à cocher (barre du haut)
 
-Les trois cases pilotent **à la fois la vue globale et le focus** :
+Les trois cases pilotent **à la fois la vue globale et le focus**, et leur état s'adapte
+automatiquement au mode pour rester fluide :
 
 - **Associations** : affiche les liens d'association (propriété → autre entité) **et** les entités
-  voisines reliées par association. C'est le poste le plus lourd ; sur un gros focus, laisser cette
-  case décochée garde l'affichage fluide (on ne voit alors que l'arbre d'héritage).
+  voisines reliées par association. C'est le poste le plus lourd (beaucoup de traits) ; sur un gros
+  focus, laisser cette case décochée garde l'affichage fluide (on ne voit alors que l'arbre d'héritage).
 - **Propriétés** : affiche les compartiments de propriétés dans chaque boîte.
-- **Enums** : affiche les énumérations comme nœuds dédiés et leurs liens.
+- **Enums** : affiche les énumérations comme nœuds dédiés et leurs liens (eux aussi multiplient les traits).
 
-**Valeurs par défaut selon la taille du corpus** (au chargement) :
+**Comportement automatique :**
 
-- **Beaucoup d'entités** (> ~120) : **Propriétés + Enums** cochées, **Associations décochée**
-  (activable à la demande). Évite de ramer sur les gros focus.
-- **Peu d'entités** : **tout** est coché (associations comprises).
+- **Vue globale** : **toutes les cases sont décochées** — on ne voit que les entités (boîtes + héritage).
+  C'est l'aperçu le plus léger et le plus lisible d'ensemble.
+- **Focus** (en entrant) : les cases sont **re-cochées selon la taille du corpus** —
+  **peu d'entités** (≤ ~120) → **tout coché** (propriétés, enums, associations) ;
+  **beaucoup d'entités** → **Propriétés seule** (enums et associations, lourds, restent activables à la demande).
+- Cocher / décocher une case applique le changement **sans recadrer la vue** (l'écran ne saute pas).
 
-> Vider le panier de liaison (« vider ») ramène à la **vue globale** avec ces valeurs par défaut.
+> Vider le panier de liaison (« vider ») ramène à la **vue globale** (toutes cases décochées).
 
 ### Profondeur
 
@@ -97,13 +101,14 @@ La souris suit un modèle volontairement non standard, pensé pour la manipulati
 | **Clic gauche (glisser) sur le vide** | **Déplace la vue** (pan), comme un cliquer-glisser classique. |
 | **Clic gauche (glisser) sur une entité** | **Déplace l'entité.** Si plusieurs entités sont sélectionnées, **tout le groupe** se déplace ensemble. |
 | **Clic gauche sur une entité** (sans glisser) | Sélectionne l'entité et ouvre ses détails. |
-| **Clic droit (glisser)** | Trace une **zone de sélection** (rubber-band). Au relâchement, toutes les entités touchées sont sélectionnées. |
-| **Maj + clic** | Ajoute / retire une entité de la sélection (sélection cumulative). |
+| **Clic droit (glisser)** | Trace une **zone de sélection** (rubber-band). Au relâchement, les entités touchées s'**ajoutent** à la sélection. **Plusieurs zones se cumulent** (on n'efface pas la sélection précédente). |
+| **Ctrl/⌘ + clic** (ou **Maj + clic**) | **Ajoute / retire** une entité de la sélection de liaison (sur le canvas ou dans la liste). |
 | **Molette** | Zoom centré sur le curseur. |
 | **Double-clic sur une entité** | Entre en **focus héritage**. |
 
 > Le **clic gauche** déplace (la vue, ou l'entité survolée) ; la sélection de texte / le drag natif
-> du navigateur est désactivé sur le canvas. La **sélection** multiple se fait au **clic droit** (zone).
+> du navigateur est désactivé sur le canvas. La **sélection** multiple se fait au **clic droit** (zone, cumulable)
+> ou au **Ctrl/⌘ + clic**. Pour retirer une entité : Ctrl/⌘ + clic dessus, ou la croix ✕ dans le panier.
 
 Le déplacement des entités est **temporaire** : il sert à mieux lire un plan. Dès qu'on
 **re-focus**, qu'on relance une **liaison** ou qu'on change la profondeur, les positions
@@ -115,21 +120,30 @@ reviennent à leur disposition calculée.
 
 Permet de répondre à la question « **comment ces entités sont-elles reliées ?** ».
 
-Deux façons de constituer la sélection :
+Trois façons de constituer la sélection (le **panier « Entités à relier »** s'affiche en haut du
+panneau gauche dès qu'une entité est sélectionnée) :
 
 - **Depuis la liste (panneau gauche)** — recommandé : cherchez une entité (p. ex. `signal`),
-  cliquez sur le bouton **🔗** de sa ligne ; elle s'ajoute au **panier « Entités à relier »**
-  affiché en haut, en surbrillance. Cherchez la suivante (`voie`), cliquez **🔗**, etc.,
-  puis cliquez sur **Relier**. Le panier reste visible même quand la recherche masque les lignes.
-- **Depuis le canvas** : zone de sélection (clic droit glissé) ou **Maj + clic**, puis **🔗 Relier**.
+  cliquez sur le bouton **🔗** de sa ligne ; elle s'ajoute au panier en surbrillance. Cherchez la
+  suivante (`voie`), cliquez **🔗**, etc. Le panier reste visible même quand la recherche masque les lignes.
+- **Ctrl/⌘ + clic** sur une entité (dans la liste **ou** sur le canvas) : l'ajoute / la retire du panier.
+- **Zone de sélection** au **clic droit glissé** sur le canvas — plusieurs zones se **cumulent**,
+  ce qui permet d'ajouter des groupes entiers d'entités.
 
-Ensuite l'app calcule les **plus courts chemins** entre les entités choisies (à travers l'héritage
-**et** les associations) et n'affiche que le **sous-graphe de connexion** : les entités sélectionnées
-(surlignées en vert) plus toutes les entités intermédiaires nécessaires pour les relier.
+Puis cliquez sur **Relier**. Pour retirer une entité : la croix **✕** sur sa puce dans le panier,
+ou **Ctrl/⌘ + clic** dessus. Le bouton **⬇ Excel** exporte la liaison (voir [Export Excel](#-export-excel)).
 
-Exemple : sélectionner *Signal* et *Voie* montre par quelles entités/associations on passe pour aller
-de l'un à l'autre — utile pour vérifier qu'un schéma relie bien les concepts attendus. Si deux entités
-ne sont **pas** connectées, l'app le signale.
+L'app calcule les **plus courts chemins** entre les entités choisies (à travers l'héritage **et** les
+associations) et n'affiche que le **sous-graphe de connexion** : les entités sélectionnées (surlignées
+en vert) plus toutes les entités intermédiaires nécessaires pour les relier.
+
+Exemple : sélectionner *Signal* et *Voie* montre par quelles entités/associations on passe pour aller de
+l'un à l'autre — utile pour vérifier qu'un schéma relie bien les concepts attendus. Si deux entités ne
+sont **pas** connectées, un bandeau le signale (et reste affiché tant qu'on est sur cette liaison).
+
+> Les **types « conteneur »** (types-document qui ne font que lister des références, p. ex. un
+> `…s` au pluriel) peuvent être une **extrémité** de liaison, mais ne servent jamais d'**intermédiaire** :
+> sinon presque toutes les entités seraient reliées trivialement en passant par le même conteneur.
 
 ---
 
@@ -165,12 +179,16 @@ Le rendu est optimisé pour les très gros graphes, **sans aucune librairie** :
 
 - **Arêtes regroupées** : toutes les arêtes d'un même type sont fusionnées en un seul tracé SVG
   (flèches incluses dans la géométrie), ce qui réduit énormément le nombre d'éléments DOM.
-- **Niveau de détail (LOD)** : quand on dézoome, les compartiments de propriétés (illisibles à
-  petite échelle) ne sont plus rendus — seules les boîtes restent.
+- **Niveau de détail (LOD) des nœuds** : quand on dézoome, les compartiments de propriétés (illisibles à
+  petite échelle) ne sont plus rendus — en dessous d'un certain zoom, une entité n'est qu'un bloc coloré.
+- **LOD des arêtes** : au zoom éloigné, les traits sont rendus **pleins et fins, sans pointillés ni
+  flèches** (ce sont les pointillés/flèches sur des milliers de courbes qui coûtent le plus cher).
 - **Culling** : seules les entités visibles dans la fenêtre courante sont montées dans le DOM
   lorsqu'on est zoomé ; le déplacement de la vue ne recalcule rien tant qu'on reste dans la zone rendue.
+- **Cases adaptatives** : la vue globale n'affiche que les entités, et un gros focus n'active pas les
+  associations/enums par défaut — ce sont les traits (associations, liens d'enums) qui font ramer.
 
-Résultat : un focus profond avec beaucoup d'associations (p. ex. `ObjetPersistant`) reste fluide.
+Résultat : un focus profond (p. ex. `ObjetPersistant`, ~380 descendants) reste fluide, même associations activées.
 
 ---
 
@@ -178,6 +196,9 @@ Résultat : un focus profond avec beaucoup d'associations (p. ex. `ObjetPersista
 
 - **⬇ Excel (complet)** : classeur multi-feuilles — *Entités, Propriétés (propres + héritées), Héritage, Associations, Énumérations*.
 - **⬇ Excel (focus)** (panneau détails) : une entité, ses propriétés (avec origine d'héritage), sa chaîne d'héritage + descendants, ses associations.
+- **⬇ Excel (liaison)** (panier « Entités à relier ») : pour les entités reliées, un classeur —
+  *Liaison* (paires reliées ou non + chemin), *Chemins (détail)* (chaque saut et sa relation),
+  *Entités du graphe*, *Associations* du sous-graphe.
 
 > Les fichiers `.xls` générés (SpreadsheetML) s'ouvrent directement dans Excel / LibreOffice.
 
