@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>XSD → UML · Visualiseur de schémas</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- ====================== BARRE DU HAUT ====================== -->
+  <header id="topbar">
+    <div class="brand">
+      <span class="logo">⬡</span>
+      <div>
+        <div class="title">XSD&nbsp;→&nbsp;UML</div>
+        <div class="subtitle">Visualiseur de schémas</div>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <div class="mode-pill" id="modePill" hidden>
+        <span id="modeLabel">Focus</span>
+        <button id="btnExitFocus" class="link" title="Revenir à la vue globale">↩ Vue globale</button>
+      </div>
+
+      <div class="group">
+        <button id="btnZoomOut" class="tool" title="Dézoomer">−</button>
+        <span id="zoomLabel" class="zoom-label">100%</span>
+        <button id="btnZoomIn" class="tool" title="Zoomer">+</button>
+        <button id="btnFit" class="tool" title="Ajuster à l'écran">⤢ Ajuster</button>
+        <button id="btnReset" class="tool" title="Réinitialiser la vue">⟳</button>
+      </div>
+
+      <div class="group toggles">
+        <label class="chk"><input type="checkbox" id="tglAssoc" /> Associations</label>
+        <label class="chk"><input type="checkbox" id="tglProps" /> Propriétés</label>
+        <label class="chk"><input type="checkbox" id="tglEnums" /> Enums</label>
+      </div>
+
+      <div class="group depth-group" title="Profondeur d'affichage des sous-classes (20 = sans limite)">
+        <label class="depth-label" for="depthRange">Profondeur</label>
+        <input type="range" id="depthRange" min="0" max="20" step="1" value="10" />
+        <span id="depthVal" class="depth-val">10</span>
+      </div>
+
+      <div class="group">
+        <button id="btnExportFull" class="tool primary" disabled title="Exporter tout le modèle en Excel">⬇ Excel (complet)</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- ====================== ZONE PRINCIPALE ====================== -->
+  <main id="main">
+    <!-- Canvas infini -->
+    <section id="canvas">
+      <div id="world">
+        <svg id="edges" xmlns="http://www.w3.org/2000/svg"></svg>
+        <div id="nodes"></div>
+      </div>
+
+      <!-- État vide -->
+      <div id="empty" class="empty">
+        <div class="empty-card">
+          <div class="empty-icon">📂</div>
+          <h2>Aucun schéma chargé</h2>
+          <p>Choisissez un dossier contenant vos fichiers <code>.xsd</code><br/>
+             (les sous-dossiers sont explorés automatiquement).</p>
+          <button id="btnPickEmpty" class="tool primary big">📁 Choisir un dossier</button>
+        </div>
+      </div>
+
+      <!-- Progression -->
+      <div id="progress" class="progress" hidden>
+        <div class="progress-card">
+          <div class="spinner"></div>
+          <div id="progressText">Chargement…</div>
+          <div class="bar"><div id="progressBar" class="bar-fill"></div></div>
+        </div>
+      </div>
+
+      <!-- Légende -->
+      <div id="legend" class="legend" hidden>
+        <div class="legend-row"><span class="lg-inh"></span> Héritage (généralisation)</div>
+        <div class="legend-row"><span class="lg-assoc"></span> Association</div>
+        <div class="legend-row"><span class="lg-enum"></span> Énumération</div>
+      </div>
+    </section>
+
+    <!-- ====================== PANNEAU DROIT ====================== -->
+    <aside id="sidebar">
+      <button id="btnPick" class="tool primary big block">📁 Choisir un dossier</button>
+
+      <div id="stats" class="stats" hidden></div>
+
+      <div class="search-wrap">
+        <input id="search" type="search" placeholder="🔎 Rechercher une entité…" autocomplete="off" disabled />
+      </div>
+
+      <div class="list-head">
+        <span id="listCount">Entités</span>
+        <div class="list-selects">
+          <select id="filterSel" class="sort" title="Filtrer">
+            <option value="entities">Entités</option>
+            <option value="enums">Énums</option>
+            <option value="all">Tout</option>
+          </select>
+          <select id="sortSel" class="sort" title="Trier">
+            <option value="az">A → Z</option>
+            <option value="props">Nb propriétés</option>
+            <option value="children">Nb sous-classes</option>
+            <option value="root">Famille</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="entityList" class="entity-list"></div>
+    </aside>
+  </main>
+
+  <!-- ====================== PANNEAU DÉTAILS (gauche) ====================== -->
+  <div id="detailsPanel" class="details-panel" hidden>
+    <div class="details-head">
+      <div>
+        <div id="detName" class="det-name"></div>
+        <div id="detStereo" class="det-stereo"></div>
+      </div>
+      <button id="btnCloseDetails" class="icon-btn" title="Fermer">✕</button>
+    </div>
+    <div class="details-actions">
+      <button id="btnDetCenter" class="tool small">🎯 Centrer</button>
+      <button id="btnDetFocus" class="tool small">🔍 Focus héritage</button>
+      <button id="btnDetExport" class="tool small">⬇ Excel (focus)</button>
+    </div>
+    <div id="detBody" class="details-body"></div>
+  </div>
+
+  <!-- Inputs cachés pour la sélection de dossier (repli universel) -->
+  <input id="dirInput" type="file" webkitdirectory directory multiple hidden />
+
+  <script src="app.js"></script>
+</body>
+</html>
