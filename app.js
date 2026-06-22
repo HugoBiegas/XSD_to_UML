@@ -1198,30 +1198,140 @@
    *  7.  EXPORT EXCEL  (SpreadsheetML 2003, multi-feuilles, sans librairie)
    * =====================================================================*/
   function sanitizeSheet(n) { return n.replace(/[:\\\/?*\[\]]/g, " ").slice(0, 31); }
-  function cellXml(v) {
+
+  // Référence de colonne OOXML (0 → "A", 26 → "AA", …).
+  function colLetter(i) {
+    let s = ""; i++;
+    while (i > 0) { s = String.fromCharCode(65 + (i - 1) % 26) + s; i = Math.floor((i - 1) / 26); }
+    return s;
+  }
+  // Largeur OOXML (en « caractères ») à partir d'une largeur en pixels.
+  function colWidth(px) { return Math.max(4, Math.round((px - 5) / 7 * 100) / 100); }
+
+  // Une cellule OOXML : nombre → <v>, sinon chaîne « inline » (style wrap = 2).
+  function cellXml(v, ref) {
     if (v == null) v = "";
     const num = typeof v === "number" || (/^-?\d+(\.\d+)?$/.test(String(v)) && String(v).length < 15);
-    const t = num ? "Number" : "String";
-    return `<Cell${num ? "" : ' ss:StyleID="wrap"'}><Data ss:Type="${t}">${escapeXml(String(v))}</Data></Cell>`;
+    if (num) return `<c r="${ref}"><v>${escapeXml(String(v))}</v></c>`;
+    return `<c r="${ref}" s="2" t="inlineStr"><is><t xml:space="preserve">${escapeXml(String(v))}</t></is></c>`;
   }
+  // Noms de colonnes uniques et non vides — exigé par les objets Table d'Excel
+  // (un en-tête vide ou en double fait « réparer » le fichier). Sans doublon, inchangé.
+  function dedupeHeader(header) {
+    const seen = new Set();
+    return (header || []).map(h => {
+      const base = String(h == null ? "" : h).trim() || "Colonne";
+      let name = base, k = 2;
+      while (seen.has(name)) name = base + " " + (k++);
+      seen.add(name); return name;
+    });
+  }
+  // Une feuille devient un objet Table seulement si elle a un en-tête ET au moins
+  // une ligne de données : Excel refuse (et « répare ») une table réduite à l'en-tête.
+  function sheetHasTable(sheet) { return (sheet.header && sheet.header.length > 0) && sheet.rows.length > 0; }
   function sheetXml(sheet) {
-    const cols = (sheet.cols || []).map(w => `<Column ss:Width="${w}"/>`).join("");
-    const head = `<Row>${sheet.header.map(h => `<Cell ss:StyleID="hdr"><Data ss:Type="String">${escapeXml(h)}</Data></Cell>`).join("")}</Row>`;
-    const rows = sheet.rows.map(r => `<Row>${r.map(cellXml).join("")}</Row>`).join("");
-    return `<Worksheet ss:Name="${escapeXml(sanitizeSheet(sheet.name))}"><Table>${cols}${head}${rows}</Table>
-      <WorksheetOptions xmlns="urn:schemas-microsoft-com:office:excel"><FreezePanes/><SplitHorizontal>1</SplitHorizontal><TopRowBottomPane>1</TopRowBottomPane><ActivePane>2</ActivePane></WorksheetOptions></Worksheet>`;
+    const header = dedupeHeader(sheet.header);
+    const hasData = sheet.rows.length > 0;
+    const hasTable = header.length > 0 && hasData;
+    const cols = (sheet.cols || []).length
+      ? `<cols>${sheet.cols.map((w, i) => `<col min="${i + 1}" max="${i + 1}" width="${colWidth(w)}" customWidth="1"/>`).join("")}</cols>`
+      : "";
+    const head = `<row r="1">${header.map((h, i) =>
+      `<c r="${colLetter(i)}1" s="1" t="inlineStr"><is><t xml:space="preserve">${escapeXml(h)}</t></is></c>`).join("")}</row>`;
+    const rows = sheet.rows.map((r, ri) => {
+      const rn = ri + 2;
+      return `<row r="${rn}">${r.map((v, ci) => cellXml(v, colLetter(ci) + rn)).join("")}</row>`;
+    }).join("");
+    // Feuille avec données → objet Table ; feuille vide → AutoFilter de feuille
+    // (boutons de filtre sur l'en-tête, sans objet Table, pour garder un rendu cohérent).
+    const lastCol = colLetter(Math.max(0, header.length - 1));
+    const tableParts = hasTable ? `<tableParts count="1"><tablePart r:id="rId1"/></tableParts>` : "";
+    const wsAutoFilter = (header.length > 0 && !hasData) ? `<autoFilter ref="A1:${lastCol}1"/>` : "";
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft"/></sheetView></sheetViews>${cols}<sheetData>${head}${rows}</sheetData>${wsAutoFilter}${tableParts}</worksheet>`;
   }
+  // Objet Table (ListObject) couvrant toute la plage : filtres auto sur chaque
+  // colonne + style tableau à bandes. tableId doit être unique dans le classeur.
+  function tableXml(sheet, tableId) {
+    const header = dedupeHeader(sheet.header);
+    const ref = `A1:${colLetter(header.length - 1)}${sheet.rows.length + 1}`;
+    const colsX = header.map((h, i) => `<tableColumn id="${i + 1}" name="${escapeXml(h)}"/>`).join("");
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="${tableId}" name="Tableau${tableId}" displayName="Tableau${tableId}" ref="${ref}" totalsRowShown="0"><autoFilter ref="${ref}"/><tableColumns count="${header.length}">${colsX}</tableColumns><tableStyleInfo name="TableStyleMedium2" showFirstColumn="0" showLastColumn="0" showRowStripes="1" showColumnStripes="0"/></table>`;
+  }
+
+  // --- CRC32 + mini-ZIP « stored » (sans compression), 100 % JS natif --------
+  const CRC_TABLE = (() => {
+    const t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      t[n] = c >>> 0;
+    }
+    return t;
+  })();
+  function crc32(bytes) {
+    let c = 0xFFFFFFFF;
+    for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+    return (c ^ 0xFFFFFFFF) >>> 0;
+  }
+  function zipStore(files) {
+    const u16 = n => [n & 0xFF, (n >>> 8) & 0xFF];
+    const u32 = n => [n & 0xFF, (n >>> 8) & 0xFF, (n >>> 16) & 0xFF, (n >>> 24) & 0xFF];
+    const enc = new TextEncoder();
+    const chunks = [], central = [];
+    let offset = 0;
+    for (const f of files) {
+      const name = enc.encode(f.name), data = f.data, crc = crc32(data);
+      const local = [...u32(0x04034b50), ...u16(20), ...u16(0), ...u16(0), ...u16(0), ...u16(0x21),
+        ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(name.length), ...u16(0)];
+      chunks.push(new Uint8Array(local), name, data);
+      central.push(new Uint8Array([...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(0), ...u16(0),
+        ...u16(0), ...u16(0x21), ...u32(crc), ...u32(data.length), ...u32(data.length),
+        ...u16(name.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0), ...u32(offset)]), name);
+      offset += local.length + name.length + data.length;
+    }
+    const centralStart = offset;
+    let centralSize = 0;
+    for (const c of central) { chunks.push(c); centralSize += c.length; }
+    chunks.push(new Uint8Array([...u32(0x06054b50), ...u16(0), ...u16(0),
+      ...u16(files.length), ...u16(files.length), ...u32(centralSize), ...u32(centralStart), ...u16(0)]));
+    let total = 0; for (const c of chunks) total += c.length;
+    const out = new Uint8Array(total);
+    let p = 0; for (const c of chunks) { out.set(c, p); p += c.length; }
+    return out;
+  }
+
   function downloadWorkbook(filename, sheets) {
-    const xml = `<?xml version="1.0"?><?mso-application progid="Excel.Sheet"?>
-<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
-<Styles>
-  <Style ss:ID="Default"><Alignment ss:Vertical="Top"/><Font ss:FontName="Segoe UI" ss:Size="10"/></Style>
-  <Style ss:ID="hdr"><Font ss:FontName="Segoe UI" ss:Size="10" ss:Bold="1" ss:Color="#FFFFFF"/><Interior ss:Color="#2563EB" ss:Pattern="Solid"/><Alignment ss:Vertical="Center"/></Style>
-  <Style ss:ID="wrap"><Alignment ss:Vertical="Top" ss:WrapText="1"/></Style>
-</Styles>
-${sheets.map(sheetXml).join("\n")}
-</Workbook>`;
-    const blob = new Blob(["﻿", xml], { type: "application/vnd.ms-excel" });
+    const enc = new TextEncoder();
+    const file = (name, str) => ({ name, data: enc.encode(str) });
+    const n = sheets.length;
+    const X = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
+
+    const contentTypes = X + `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${sheets.map((s, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join("")}${sheets.map((s, i) => sheetHasTable(s) ? `<Override PartName="/xl/tables/table${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/>` : "").join("")}</Types>`;
+
+    const rels = X + `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`;
+
+    const workbook = X + `<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${sheets.map((s, i) => `<sheet name="${escapeXml(sanitizeSheet(s.name))}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join("")}</sheets></workbook>`;
+
+    const wbRels = X + `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheets.map((s, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join("")}<Relationship Id="rId${n + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`;
+
+    const styles = X + `<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="10"/><name val="Segoe UI"/></font><font><b/><sz val="10"/><color rgb="FFFFFFFF"/><name val="Segoe UI"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF2563EB"/></patternFill></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment vertical="top"/></xf><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment vertical="center"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles><dxfs count="0"/><tableStyles count="0" defaultTableStyle="TableStyleMedium2" defaultPivotStyle="PivotStyleLight16"/></styleSheet>`;
+
+    // Relations de chaque feuille → son objet Table.
+    const wsRels = id => X + `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table${id}.xml"/></Relationships>`;
+
+    const files = [
+      file("[Content_Types].xml", contentTypes),
+      file("_rels/.rels", rels),
+      file("xl/workbook.xml", workbook),
+      file("xl/_rels/workbook.xml.rels", wbRels),
+      file("xl/styles.xml", styles),
+      ...sheets.map((s, i) => file(`xl/worksheets/sheet${i + 1}.xml`, sheetXml(s))),
+      ...sheets.flatMap((s, i) => sheetHasTable(s) ? [file(`xl/worksheets/_rels/sheet${i + 1}.xml.rels`, wsRels(i + 1))] : []),
+      ...sheets.flatMap((s, i) => sheetHasTable(s) ? [file(`xl/tables/table${i + 1}.xml`, tableXml(s, i + 1))] : []),
+    ];
+    const blob = new Blob([zipStore(files)], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = filename;
@@ -1257,7 +1367,7 @@ ${sheets.map(sheetXml).join("\n")}
     for (const e of [...state.enums.values()].sort((a, b) => a.name.localeCompare(b.name))) {
       enr.rows.push([e.name, e.values.join(", ")]);
     }
-    downloadWorkbook("XSD_UML_complet.xls", [ent, props, inh, asso, enr]);
+    downloadWorkbook("XSD_UML_complet.xlsx", [ent, props, inh, asso, enr]);
   }
 
   function exportFocus(name) {
@@ -1283,7 +1393,7 @@ ${sheets.map(sheetXml).join("\n")}
     for (const d of desc) tree.rows.push([ancestors(d).length, "↳ " + d, "hérite de " + (baseOf(d) || "")]);
     const asso = { name: "Associations", cols: [200, 200, 90, 80], header: ["Propriété", "Cible", "Cardinalité", "Type"], rows: [] };
     for (const a of assocOf(name)) asso.rows.push([a.prop, a.target, a.card, a.kind]);
-    downloadWorkbook("XSD_UML_focus_" + name + ".xls", [info, props, tree, asso]);
+    downloadWorkbook("XSD_UML_focus_" + name + ".xlsx", [info, props, tree, asso]);
   }
 
   // Export Excel d'une LIAISON : entités sélectionnées + chemins de connexion + sous-graphe.
@@ -1311,7 +1421,7 @@ ${sheets.map(sheetXml).join("\n")}
     }
     const asso = { name: "Associations", cols: [240, 200, 240, 90], header: ["Source", "Propriété", "Cible", "Cardinalité"], rows: [] };
     for (const n of [...union].sort((a, b) => a.localeCompare(b))) for (const a of assocOf(n)) if (union.has(a.target)) asso.rows.push([n, a.prop, a.target, a.card]);
-    const fname = "XSD_UML_liaison_" + ks.join("-").replace(/[^\w-]/g, "").slice(0, 50) + ".xls";
+    const fname = "XSD_UML_liaison_" + ks.join("-").replace(/[^\w-]/g, "").slice(0, 50) + ".xlsx";
     downloadWorkbook(fname, [summary, steps, ent, asso]);
   }
 

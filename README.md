@@ -200,13 +200,20 @@ Résultat : un focus profond (p. ex. `ObjetPersistant`, ~380 descendants) reste 
   *Liaison* (paires reliées ou non + chemin), *Chemins (détail)* (chaque saut et sa relation),
   *Entités du graphe*, *Associations* du sous-graphe.
 
-> Les fichiers `.xls` générés (SpreadsheetML) s'ouvrent directement dans Excel / LibreOffice.
+> Les fichiers `.xlsx` générés (OOXML natif, sans librairie) s'ouvrent **directement** dans Excel /
+> LibreOffice, sans avertissement « le format et l'extension ne correspondent pas ».
+
+> **Chaque feuille est un vrai « Tableau » Excel** (objet *ListObject*) : les colonnes ont des
+> **menus de filtre/tri** prêts à l'emploi et un style à bandes. (Une feuille sans aucune ligne de
+> données reçoit un simple filtre automatique d'en-tête plutôt qu'un objet Tableau, qu'Excel
+> refuserait.)
 
 ---
 
 ## ⚙️ Détails techniques
 
-- **Aucune librairie externe.** Parsing via `DOMParser`, rendu via DOM + SVG, export via SpreadsheetML.
+- **Aucune librairie externe.** Parsing via `DOMParser`, rendu via DOM + SVG, export `.xlsx` (OOXML)
+  via un mini-packer ZIP + CRC32 écrits en JavaScript natif.
 - **Performance** : lecture/parsing par lots avec barre de progression ; layout hiérarchique calculé une
   fois et mis en cache ; rendu avec batching d'arêtes, LOD et culling (voir [Performances](#-performances)).
 - **Compatibilité** : Chromium (Chrome / Edge) recommandé. Firefox fonctionne via le sélecteur de dossier classique.

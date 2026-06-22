@@ -23,7 +23,7 @@ fichier à l'autre.
 |------------|--------|
 | **100 % local** | Aucune connexion Internet requise. Fonctionne en `file://` (double-clic) ou servi en `http://localhost`. |
 | **Zéro dépendance externe** | Aucune librairie, aucun `npm install`, rien à télécharger. Tout est en JavaScript/CSS/HTML natif. Si une dépendance devait être ajoutée, elle devrait être **embarquée dans le dépôt** (vendored), jamais chargée depuis un CDN. |
-| **Traitement côté client** | Parsing via `DOMParser`, rendu DOM + SVG, export via SpreadsheetML — le tout dans le navigateur. Aucune donnée n'est envoyée à un serveur. |
+| **Traitement côté client** | Parsing via `DOMParser`, rendu DOM + SVG, export `.xlsx` (OOXML) — le tout dans le navigateur. Aucune donnée n'est envoyée à un serveur. |
 | **Performance** | Doit rester fluide sur de gros graphes (centaines d'entités, milliers d'arêtes). |
 | **Navigateurs** | Chromium (Chrome / Edge) recommandé. Firefox supporté via le sélecteur de dossier classique. |
 
@@ -211,9 +211,30 @@ Les trois cases pilotent **global ET focus**. Effet :
 
 ---
 
-## 10. Exports Excel (SpreadsheetML 2003, sans librairie)
+## 10. Exports Excel (`.xlsx` OOXML, sans librairie)
 
-Fichiers `.xls` ouvrables directement dans Excel / LibreOffice.
+Fichiers `.xlsx` ouvrables **directement** dans Excel / LibreOffice, **sans** l'avertissement « le format
+et l'extension du fichier ne correspondent pas » (le contenu est un vrai classeur OOXML, pas du XML
+SpreadsheetML déguisé en `.xls`).
+
+> **Génération** : un `.xlsx` est une archive **ZIP** de parties XML. L'app construit ces parties
+> (`[Content_Types].xml`, `_rels/.rels`, `xl/workbook.xml`, `xl/styles.xml`, `xl/worksheets/sheetN.xml`,
+> `xl/tables/tableN.xml`) puis les empaquette avec un mini-générateur ZIP « stored » (sans compression)
+> + **CRC32**, le tout en JavaScript natif — aucune librairie (`downloadWorkbook` dans `app.js`).
+
+### Tableaux filtrables
+
+Chaque feuille est exportée comme un **vrai objet Table Excel** (*ListObject*, style `TableStyleMedium2`),
+ce qui donne automatiquement des **menus de filtre et de tri** sur chaque colonne, plus l'en-tête figé.
+
+Règles (sinon Excel « répare » le fichier et retire les tables) :
+
+- une table doit avoir un en-tête **et au moins une ligne de données** → une feuille **sans données**
+  reçoit un simple `autoFilter` de feuille (boutons de filtre sur l'en-tête) au lieu d'un objet Table ;
+- les **noms de colonnes** d'une table doivent être **uniques et non vides** (dé-doublonnage automatique) ;
+- `styles.xml` doit déclarer `<dxfs>` et `<tableStyles>` dès qu'une table est présente ;
+- chaque table a un `id`/nom unique dans le classeur et est reliée à sa feuille via
+  `xl/worksheets/_rels/sheetN.xml.rels` + `<tableParts>`.
 
 | Export | Déclencheur | Feuilles |
 |--------|-------------|----------|
